@@ -1,0 +1,5 @@
+htsvcf.node
+node_modules
+*.tgz
+target
+*.so

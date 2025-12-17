@@ -1,0 +1,17 @@
+[package]
+name = "htsvcf-napi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+htsvcf-core = { path = "../htsvcf-core" }
+napi = { version = "3", default-features = false, features = ["napi8", "compat-mode"] }
+napi-derive = "3"
+rust-htslib.workspace = true
+
+[build-dependencies]
+napi-build = "2"

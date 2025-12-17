@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/htsvcf",
+  "crates/htsvcf-core",
+  "crates/htsvcf-napi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+rust-htslib = "0.51.0"

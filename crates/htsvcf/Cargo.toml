@@ -1,0 +1,12 @@
+[package]
+name = "htsvcf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "htsvcf"
+
+[dependencies]
+v8 = "142.2.0"
+rust-htslib.workspace = true

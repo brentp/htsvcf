@@ -1,0 +1,30 @@
+{
+  "name": "htsvcf",
+  "version": "0.1.0",
+  "description": "VCF/BCF reader for Node/Bun (N-API addon)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "examples/",
+    "*.node"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "build": "napi build --platform --release"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}

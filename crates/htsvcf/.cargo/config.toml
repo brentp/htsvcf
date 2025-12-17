@@ -1,0 +1,3 @@
+[build]
+cflags = ["-C", "cross-lang-lto"]
+
