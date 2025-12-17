@@ -21,7 +21,7 @@ When adding or changing any public API (Reader/Header/Variant/etc.), do **all** 
    - **v8 tests**: add/extend Rust tests under `crates/htsvcf/` (e.g. `#[cfg(test)]` modules in `src/*` or `crates/htsvcf/tests/*.rs`).
    - **napi tests**: add/extend Node tests under `npm/htsvcf/test/*.test.mjs`.
 
-4. **Build + copy the native addon, then run Node tests**
+4. **Build + copy the native addon, then run JS tests**
    - Build the N-API addon:
      - `cargo build -p htsvcf-napi --release`
    - Copy the produced shared library into the npm package location:
@@ -29,6 +29,8 @@ When adding or changing any public API (Reader/Header/Variant/etc.), do **all** 
      - macOS: `cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node`
    - Run Node tests:
      - `npm -C npm/htsvcf test`
+   - Run Bun smoke test (quick sanity check):
+     - `bun run npm/htsvcf/examples/smoke.mjs`
 
 5. **Run Rust tests**
    - `cargo test -p htsvcf`

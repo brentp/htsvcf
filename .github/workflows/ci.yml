@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} (rust + napi + node + bun)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Rust tests (v8 binding)
+        run: cargo test -p htsvcf
+
+      - name: Rust tests (napi binding)
+        run: cargo test -p htsvcf-napi
+
+      - name: Build N-API addon (release)
+        run: cargo build -p htsvcf-napi --release
+
+      - name: Copy addon into npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cp -f target/release/libhtsvcf_napi.so npm/htsvcf/htsvcf.node
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node
+          else
+            echo "Unsupported OS: ${{ runner.os }}" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: npm/htsvcf/package.json
+
+      - name: Install npm deps
+        run: npm -C npm/htsvcf install
+
+      - name: Node tests
+        run: npm -C npm/htsvcf test
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Bun smoke test
+        run: bun run npm/htsvcf/examples/smoke.mjs

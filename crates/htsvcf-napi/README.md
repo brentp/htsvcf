@@ -13,7 +13,8 @@ From the repo root:
   - Linux: `cp -f target/release/libhtsvcf_napi.so npm/htsvcf/htsvcf.node`
   - macOS: `cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node`
 - Run the smoke example against the rebuilt addon:
-  - `node npm/htsvcf/examples/smoke.mjs`
+  - Node: `node npm/htsvcf/examples/smoke.mjs`
+  - Bun: `bun run npm/htsvcf/examples/smoke.mjs`
 
 ## Rust Tests
 

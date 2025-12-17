@@ -49,5 +49,7 @@ From the repo root:
 - Copy/rename the produced shared library to `npm/htsvcf/htsvcf.node`
   - Linux: `cp -f target/release/libhtsvcf_napi.so npm/htsvcf/htsvcf.node`
   - macOS: `cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node`
-- Run the smoke example against the rebuilt addon: `node npm/htsvcf/examples/smoke.mjs`
-- Run JS tests: `npm -C npm/htsvcf test`
+- Run the smoke example against the rebuilt addon:
+  - Node: `node npm/htsvcf/examples/smoke.mjs`
+  - Bun: `bun run npm/htsvcf/examples/smoke.mjs`
+- Run JS tests (Node): `npm -C npm/htsvcf test`
