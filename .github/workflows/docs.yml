@@ -3,6 +3,7 @@ name: Docs
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -20,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -30,16 +33,73 @@ jobs:
           workspaces: |
             . -> target
 
-      - name: Build docs
-        run: cargo doc --workspace --no-deps
+      - name: Prepare site directory
+        run: mkdir -p site
 
-      - name: Add redirect to main crate
-        run: echo '<meta http-equiv="refresh" content="0; url=htsvcf/index.html">' > target/doc/index.html
+      - name: Build docs for all tags
+        run: |
+          for tag in $(git tag -l 'v*' | sort -V); do
+            echo "::group::Building docs for $tag"
+            git checkout "$tag"
+            if cargo doc --workspace --no-deps; then
+              mkdir -p "site/$tag"
+              cp -r target/doc/* "site/$tag/"
+              echo '<meta http-equiv="refresh" content="0; url=htsvcf/index.html">' > "site/$tag/index.html"
+            else
+              echo "Warning: Failed to build docs for $tag"
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Build docs for main (latest)
+        run: |
+          git checkout ${{ github.sha }}
+          cargo doc --workspace --no-deps
+          mkdir -p site/latest
+          cp -r target/doc/* site/latest/
+          echo '<meta http-equiv="refresh" content="0; url=htsvcf/index.html">' > site/latest/index.html
+
+      - name: Create root redirect
+        run: echo '<meta http-equiv="refresh" content="0; url=latest/htsvcf/index.html">' > site/index.html
+
+      - name: Generate version index
+        run: |
+          cat > site/versions.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>htsvcf Documentation Versions</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+              h1 { color: #333; }
+              ul { list-style: none; padding: 0; }
+              li { margin: 10px 0; }
+              a { color: #0066cc; text-decoration: none; font-size: 1.1em; }
+              a:hover { text-decoration: underline; }
+            </style>
+          </head>
+          <body>
+            <h1>htsvcf Documentation</h1>
+            <ul>
+              <li><a href="latest/htsvcf/index.html">latest (main branch)</a></li>
+          EOF
+          
+          # Add tagged versions in reverse order (newest first)
+          for dir in $(ls -d site/v* 2>/dev/null | sort -rV); do
+            version=$(basename "$dir")
+            echo "    <li><a href=\"$version/htsvcf/index.html\">$version</a></li>" >> site/versions.html
+          done
+          
+          cat >> site/versions.html << 'EOF'
+            </ul>
+          </body>
+          </html>
+          EOF
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: target/doc
+          path: site
 
   deploy:
     needs: build
