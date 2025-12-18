@@ -118,3 +118,7 @@ See `js-api.md` for the full JS API specification, including:
 - `Variant.info(tag)` / `Variant.format(tag)` for typed INFO/FORMAT lookups
 - `Variant.set_info(tag, value)` for mutating INFO fields (`null` clears)
 - Writable properties: `id`, `qual`, `filter`
+
+### Releasing
+
+See [npm/htsvcf/RELEASING.md](npm/htsvcf/RELEASING.md) for instructions on publishing new npm releases.
