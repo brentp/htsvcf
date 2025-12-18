@@ -109,6 +109,7 @@ cargo build -p htsvcf-napi --release
 cp -f target/release/libhtsvcf_napi.so npm/htsvcf/htsvcf.node   # Linux
 # cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node  # macOS
 npm -C npm/htsvcf test
+bun npm/htsvcf/examples/smoke.mjs
 ```
 
 ### API Documentation
