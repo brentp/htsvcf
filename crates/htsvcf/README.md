@@ -112,8 +112,10 @@ if (r.hasIndex()) {
   - `variant.filter` (array of strings; writable)
     - `variant.filter = ['PASS']` clears filters and reads back as `[]`
     - Named filters must exist in the header (a `##FILTER=<ID=...>` definition) to set successfully
-  - `variant.info(tag)` (typed `INFO` lookup using `header`)
-  - `variant.format(tag)` (typed `FORMAT` lookup using `header`, returns array per sample)
+- `variant.info(tag)` (typed `INFO` lookup using `header`)
+- `variant.set_info(tag, value)` (mutate INFO; typed by `header`, `null`/`undefined` clears)
+- `variant.format(tag)` (typed `FORMAT` lookup using `header`, returns array per sample)
+
 
 ## Notes
 

@@ -40,6 +40,7 @@ export class Variant {
   set filter(v: string[]);
 
   info(tag: string): boolean | number | string | Array<number | string> | null | undefined;
+  set_info(tag: string, value: boolean | number | string | Array<boolean | number | string> | null | undefined): void;
   format(tag: string): Array<boolean | number | string | Array<number | string> | null> | undefined;
   toString(): string;
 }

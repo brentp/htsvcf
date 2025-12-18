@@ -32,7 +32,8 @@ Reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two Java
 
 - JS API spec/proposal: `js-api.md`
   - This is the current reference for the intended Node/Bun API surface.
-  - Includes `Variant.info(tag)` and `Variant.format(tag)` (typed INFO/FORMAT lookups).
+  - Includes `Variant.info(tag)` / `Variant.format(tag)` (typed INFO/FORMAT lookups).
+  - Includes `Variant.set_info(tag, value)` for mutating INFO fields (typed by header; `null` clears).
   - `Variant.id`, `Variant.qual`, and `Variant.filter` are writable (e.g. `variant.qual = null` clears; `variant.filter = ['PASS']` clears and reads back as `[]`).
 
 ## Development notes

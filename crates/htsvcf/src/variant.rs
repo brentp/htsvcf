@@ -190,6 +190,10 @@ pub fn create_object_template<'a>(
     let info_template = v8::FunctionTemplate::new(scope, info_fn);
     object_template.set(info_key.into(), info_template.into());
 
+    let set_info_key = v8::String::new(scope, "set_info").unwrap();
+    let set_info_template = v8::FunctionTemplate::new(scope, set_info_fn);
+    object_template.set(set_info_key.into(), set_info_template.into());
+
     let format_key = v8::String::new(scope, "format").unwrap();
     let format_template = v8::FunctionTemplate::new(scope, format_fn);
     object_template.set(format_key.into(), format_template.into());
@@ -356,6 +360,209 @@ fn attr_setter(
             let msg = v8::String::new(scope, "Invalid key").unwrap();
             scope.throw_exception(v8::Exception::error(scope, msg));
         }
+    }
+}
+
+/// V8 callback for `variant.info(tag)`.
+///
+/// Uses the JS `header` object to resolve the tag's type and cardinality.
+fn set_info_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    mut _rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    if args.length() < 2 {
+        let msg = v8::String::new(scope, "variant.set_info(tag, value) requires 2 arguments").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let tag = args.get(0);
+    let Ok(tag_str) = v8::Local::<v8::String>::try_from(tag) else {
+        let msg = v8::String::new(scope, "variant.set_info tag must be a string").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+    let tag = tag_str.to_rust_string_lossy(scope);
+    let tag_bytes = tag.as_bytes();
+
+    let Some(header_data) = this.get_internal_field(scope, HEADER_INTERNAL_FIELD_INDEX) else {
+        let msg = v8::String::new(scope, "variant has no header").unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+        return;
+    };
+    let Ok(header_obj) = v8::Local::<v8::Object>::try_from(header_data) else {
+        let msg = v8::String::new(scope, "variant has invalid header").unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+        return;
+    };
+
+    let header_wrapper =
+        unsafe { v8::Object::unwrap::<{ header::HEADER_TAG }, header::Header>(scope, header_obj) }
+            .expect("Failed to unwrap Header");
+    let header: &header::Header = unsafe { header_wrapper.as_ref() };
+
+    let (tag_type, _tag_length) = match header.info_type(tag_bytes) {
+        Some(v) => v,
+        None => {
+            let msg = v8::String::new(scope, &format!("undefined INFO tag: {tag}")).unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        }
+    };
+
+    let value = args.get(1);
+
+    enum InfoWriteValue {
+        Clear,
+        Flag(bool),
+        Integers(Vec<i32>),
+        Floats(Vec<f32>),
+        Strings(Vec<String>),
+    }
+
+    let parsed = if value.is_null_or_undefined() {
+        InfoWriteValue::Clear
+    } else {
+        match tag_type {
+            TagType::Flag => {
+                let Ok(b) = v8::Local::<v8::Boolean>::try_from(value) else {
+                    let msg = v8::String::new(scope, "flag INFO requires boolean value").unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                };
+                InfoWriteValue::Flag(b.is_true())
+            }
+            TagType::Integer => {
+                if let Ok(arr) = v8::Local::<v8::Array>::try_from(value) {
+                    let mut out = Vec::with_capacity(arr.length() as usize);
+                    for i in 0..arr.length() {
+                        let Some(v) = arr.get_index(scope, i) else {
+                            continue;
+                        };
+                        let Ok(n) = v8::Local::<v8::Number>::try_from(v) else {
+                            let msg = v8::String::new(scope, "integer INFO requires number array").unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        };
+                        let f = n.value();
+                        if !f.is_finite() || (f.fract() != 0.0) {
+                            let msg = v8::String::new(scope, "integer INFO values must be integers").unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        }
+                        out.push(f as i32);
+                    }
+                    InfoWriteValue::Integers(out)
+                } else {
+                    let Ok(n) = v8::Local::<v8::Number>::try_from(value) else {
+                        let msg = v8::String::new(scope, "integer INFO requires number value").unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    };
+                    let f = n.value();
+                    if !f.is_finite() || (f.fract() != 0.0) {
+                        let msg = v8::String::new(scope, "integer INFO value must be an integer").unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    }
+                    InfoWriteValue::Integers(vec![f as i32])
+                }
+            }
+            TagType::Float => {
+                if let Ok(arr) = v8::Local::<v8::Array>::try_from(value) {
+                    let mut out = Vec::with_capacity(arr.length() as usize);
+                    for i in 0..arr.length() {
+                        let Some(v) = arr.get_index(scope, i) else {
+                            continue;
+                        };
+                        let Ok(n) = v8::Local::<v8::Number>::try_from(v) else {
+                            let msg = v8::String::new(scope, "float INFO requires number array").unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        };
+                        let f = n.value();
+                        if !f.is_finite() {
+                            let msg = v8::String::new(scope, "float INFO values must be finite").unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        }
+                        out.push(f as f32);
+                    }
+                    InfoWriteValue::Floats(out)
+                } else {
+                    let Ok(n) = v8::Local::<v8::Number>::try_from(value) else {
+                        let msg = v8::String::new(scope, "float INFO requires number value").unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    };
+                    let f = n.value();
+                    if !f.is_finite() {
+                        let msg = v8::String::new(scope, "float INFO value must be finite").unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    }
+                    InfoWriteValue::Floats(vec![f as f32])
+                }
+            }
+            TagType::String => {
+                if let Ok(arr) = v8::Local::<v8::Array>::try_from(value) {
+                    let mut strings = Vec::with_capacity(arr.length() as usize);
+                    for i in 0..arr.length() {
+                        let Some(v) = arr.get_index(scope, i) else {
+                            continue;
+                        };
+                        let Ok(s) = v8::Local::<v8::String>::try_from(v) else {
+                            let msg = v8::String::new(scope, "string INFO requires string array").unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        };
+                        strings.push(s.to_rust_string_lossy(scope));
+                    }
+                    InfoWriteValue::Strings(strings)
+                } else {
+                    let Ok(s) = v8::Local::<v8::String>::try_from(value) else {
+                        let msg = v8::String::new(scope, "string INFO requires string value").unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    };
+                    InfoWriteValue::Strings(vec![s.to_rust_string_lossy(scope)])
+                }
+            }
+        }
+    };
+
+    let res = {
+        let record = variant.record.get_mut(scope);
+        let out = match (tag_type, parsed) {
+            (_, InfoWriteValue::Clear) => match tag_type {
+                TagType::Flag => record.clear_info_flag(tag_bytes),
+                TagType::Integer => record.clear_info_integer(tag_bytes),
+                TagType::Float => record.clear_info_float(tag_bytes),
+                TagType::String => record.clear_info_string(tag_bytes),
+            },
+            (TagType::Flag, InfoWriteValue::Flag(true)) => record.push_info_flag(tag_bytes),
+            (TagType::Flag, InfoWriteValue::Flag(false)) => record.clear_info_flag(tag_bytes),
+            (TagType::Integer, InfoWriteValue::Integers(v)) => record.push_info_integer(tag_bytes, &v),
+            (TagType::Float, InfoWriteValue::Floats(v)) => record.push_info_float(tag_bytes, &v),
+            (TagType::String, InfoWriteValue::Strings(v)) => {
+                let refs: Vec<&[u8]> = v.iter().map(|s| s.as_bytes()).collect();
+                record.push_info_string(tag_bytes, &refs)
+            }
+            _ => Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() }),
+        };
+        record.unpack();
+        out
+    };
+
+    if let Err(e) = res {
+        let msg = v8::String::new(scope, &format!("failed to set info {tag}: {e}")).unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
     }
 }
 
@@ -1078,6 +1285,48 @@ mod tests {
         assert_eq!(eval_js(path, "variant.info('FLAGS').length"), "3");
         assert_eq!(eval_js(path, "variant.info('FLAGS')[2]"), "c");
         assert_eq!(eval_js(path, "variant.info('SOMATIC')"), "true");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `variant.set_info()` should mutate INFO by header type.
+    fn test_js_set_info() {
+        let path = tmp_path("set_info.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+  ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+  ##INFO=<ID=AD,Number=2,Type=Integer,Description=\"Allele depths\">\n\
+  ##INFO=<ID=AF,Number=2,Type=Float,Description=\"Allele frequencies\">\n\
+  ##INFO=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
+  ##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic\">\n\
+  ##contig=<ID=chr1>\n\
+  #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+  chr1\t1\t.\tA\tC,G\t.\t.\t.\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        assert_eq!(eval_js(path, "variant.set_info('DP', 32); variant.info('DP')"), "32");
+        assert_eq!(
+            eval_js(path, "variant.set_info('AD', [1, 2]); variant.info('AD')[1]"),
+            "2"
+        );
+        assert_eq!(
+            eval_js(path, "variant.set_info('AF', [0.1, 0.2]); Math.abs(variant.info('AF')[0] - 0.1) < 1e-6"),
+            "true"
+        );
+        assert_eq!(
+            eval_js(path, "variant.set_info('NOTE', 'hi'); variant.info('NOTE')"),
+            "hi"
+        );
+        assert_eq!(
+            eval_js(path, "variant.set_info('SOMATIC', true); variant.info('SOMATIC')"),
+            "true"
+        );
+
+        assert_eq!(
+            eval_js(path, "variant.set_info('DP', null); variant.info('DP')"),
+            "undefined"
+        );
 
         let _ = fs::remove_file(path);
     }

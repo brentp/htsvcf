@@ -342,6 +342,160 @@ impl Variant {
     let v = self.inner.format(&self.header, &tag);
     formatvalue_to_napi_value(&env, &v)
   }
+
+  #[napi(js_name = "set_info")]
+  pub fn set_info(&mut self, tag: String, value: Unknown) -> napi::Result<()> {
+    use napi::ValueType;
+    use rust_htslib::bcf::header::TagType;
+
+    let Some((tag_type, _tag_length)) = self.header.info_type(tag.as_bytes()) else {
+      return Err(Error::new(
+        Status::InvalidArg,
+        format!("undefined INFO tag: {tag}"),
+      ));
+    };
+
+    match value.get_type()? {
+      ValueType::Null | ValueType::Undefined => {
+        self.inner
+          .clear_info(&self.header, &tag)
+          .map_err(|e| Error::new(Status::GenericFailure, format!("failed to clear info {tag}: {e}")))?;
+        return Ok(());
+      }
+      _ => {}
+    }
+
+    match tag_type {
+      TagType::Flag => {
+        if value.is_array()? {
+          return Err(Error::new(
+            Status::InvalidArg,
+            format!("INFO/{tag} is Flag; expected boolean"),
+          ));
+        }
+
+        if value.get_type()? != ValueType::Boolean {
+          return Err(Error::new(
+            Status::InvalidArg,
+            format!("INFO/{tag} is Flag; expected boolean"),
+          ));
+        }
+
+        let is_set: bool = unsafe { value.cast()? };
+        self.inner
+          .set_info_flag(&self.header, &tag, is_set)
+          .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
+      }
+      TagType::Integer => {
+        let values = unknown_to_numbers(&tag, value)?;
+        let mut out: Vec<i32> = Vec::with_capacity(values.len());
+        for n in values {
+          if !n.is_finite() {
+            return Err(Error::new(Status::InvalidArg, "number must be finite"));
+          }
+          if n.fract() != 0.0 {
+            return Err(Error::new(
+              Status::InvalidArg,
+              format!("INFO/{tag} is Integer; got non-integer value"),
+            ));
+          }
+          if n < (i32::MIN as f64) || n > (i32::MAX as f64) {
+            return Err(Error::new(
+              Status::InvalidArg,
+              format!("INFO/{tag} integer out of range"),
+            ));
+          }
+          out.push(n as i32);
+        }
+
+        self.inner
+          .set_info_integer(&self.header, &tag, &out)
+          .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
+      }
+      TagType::Float => {
+        let values = unknown_to_numbers(&tag, value)?;
+        let mut out: Vec<f32> = Vec::with_capacity(values.len());
+        for n in values {
+          if !n.is_finite() {
+            return Err(Error::new(Status::InvalidArg, "number must be finite"));
+          }
+          out.push(n as f32);
+        }
+
+        self.inner
+          .set_info_float(&self.header, &tag, &out)
+          .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
+      }
+      TagType::String => {
+        let values: Vec<String> = unknown_to_strings(&tag, value)?;
+        self.inner
+          .set_info_string(&self.header, &tag, &values)
+          .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
+      }
+    }
+
+    Ok(())
+  }
+}
+
+fn unknown_to_numbers(tag: &str, value: Unknown) -> napi::Result<Vec<f64>> {
+  if value.is_array()? {
+    let arr: Array = unsafe { value.cast()? };
+    let len = arr.len();
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+      let v: Unknown = arr.get_element(i)?;
+      let n = unknown_to_number(tag, v)?;
+      out.push(n);
+    }
+    return Ok(out);
+  }
+
+  Ok(vec![unknown_to_number(tag, value)?])
+}
+
+fn unknown_to_number(tag: &str, value: Unknown) -> napi::Result<f64> {
+  use napi::ValueType;
+
+  if value.get_type()? != ValueType::Number {
+    return Err(Error::new(
+      Status::InvalidArg,
+      format!("INFO/{tag} expected number"),
+    ));
+  }
+
+  let n: f64 = unsafe { value.cast()? };
+  Ok(n)
+}
+
+fn unknown_to_strings(tag: &str, value: Unknown) -> napi::Result<Vec<String>> {
+  if value.is_array()? {
+    let arr: Array = unsafe { value.cast()? };
+    let len = arr.len();
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+      let v: Unknown = arr.get_element(i)?;
+      let s = unknown_to_string(tag, v)?;
+      out.push(s);
+    }
+    return Ok(out);
+  }
+
+  Ok(vec![unknown_to_string(tag, value)?])
+}
+
+fn unknown_to_string(tag: &str, value: Unknown) -> napi::Result<String> {
+  use napi::ValueType;
+
+  if value.get_type()? != ValueType::String {
+    return Err(Error::new(
+      Status::InvalidArg,
+      format!("INFO/{tag} expected string"),
+    ));
+  }
+
+  let s: String = unsafe { value.cast()? };
+  Ok(s)
 }
 
 #[napi]

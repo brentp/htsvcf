@@ -141,6 +141,55 @@ test("Variant.format returns per-sample typed values", async () => {
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
+test("Variant.set_info mutates INFO fields", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-info-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    '##INFO=<ID=AD,Number=2,Type=Integer,Description="Allele Depths">',
+    '##INFO=<ID=AF,Number=2,Type=Float,Description="Allele Frequencies">',
+    '##INFO=<ID=NOTE,Number=1,Type=String,Description="Note">',
+    '##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description="Somatic">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    "chr1\t1\t.\tA\tC,G\t.\t.\t.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  variant.set_info("DP", 32);
+  assert.equal(variant.info("DP"), 32);
+
+  variant.set_info("AD", [1, 2]);
+  assert.deepEqual(variant.info("AD"), [1, 2]);
+
+  variant.set_info("AF", [0.1, 0.2]);
+  assert.ok(Math.abs(variant.info("AF")[0] - 0.1) < 1e-6);
+  assert.ok(Math.abs(variant.info("AF")[1] - 0.2) < 1e-6);
+
+  variant.set_info("NOTE", "hi");
+  assert.equal(variant.info("NOTE"), "hi");
+
+  variant.set_info("SOMATIC", true);
+  assert.equal(variant.info("SOMATIC"), true);
+
+  variant.set_info("DP", null);
+  assert.equal(variant.info("DP"), undefined);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
 test("nextSync returns done=true at EOF", () => {
   const reader = new Reader(vcfPath);
 

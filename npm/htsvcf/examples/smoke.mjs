@@ -11,6 +11,7 @@ const __dirname = path.dirname(__filename);
 const vcfPath = path.join(__dirname, "..", "..", "..", "tests", "t.vcf.gz");
 
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-smoke-"));
+
 const filterVcfPath = path.join(tmpDir, "filter.vcf");
 await fs.writeFile(
   filterVcfPath,
@@ -23,8 +24,24 @@ await fs.writeFile(
   ].join("\n"),
 );
 
+const setInfoVcfPath = path.join(tmpDir, "set_info.vcf");
+await fs.writeFile(
+  setInfoVcfPath,
+  [
+    "##fileformat=VCFv4.2",
+    '##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    '##INFO=<ID=NOTE,Number=1,Type=String,Description="Note">',
+    '##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description="Somatic">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    "chr1\t10\t.\tA\tC\t.\tPASS\tDP=10;NOTE=hello",
+    "",
+  ].join("\n"),
+);
+
 const reader = new Reader(vcfPath);
 const filterReader = new Reader(filterVcfPath);
+const setInfoReader = new Reader(setInfoVcfPath);
 
 // Header methods
 assert.equal(reader.header, reader.header, "header should have stable identity");
@@ -98,6 +115,25 @@ assert.deepEqual(it.value.filter, ["PASS"]);
 it.value.filter = ["LowQual"];
 assert.deepEqual(it.value.filter, ["LowQual"]);
 
+// INFO setter sanity check
+const it2 = setInfoReader.nextSync();
+assert.equal(it2.done, false);
+assert.ok(it2.value);
+assert.equal(it2.value.info("DP"), 10);
+assert.equal(it2.value.info("NOTE"), "hello");
+
+it2.value.set_info("DP", 32);
+assert.equal(it2.value.info("DP"), 32);
+
+it2.value.set_info("NOTE", "hi");
+assert.equal(it2.value.info("NOTE"), "hi");
+
+it2.value.set_info("SOMATIC", true);
+assert.equal(it2.value.info("SOMATIC"), true);
+
+it2.value.set_info("DP", null);
+assert.equal(it2.value.info("DP"), undefined);
+
 if (reader.hasIndex()) {
   await reader.query("chr1:1000-2000");
   const { value, done } = await reader.next();
@@ -111,6 +147,7 @@ if (reader.hasIndex()) {
 
 reader.close();
 filterReader.close();
+setInfoReader.close();
 await fs.rm(tmpDir, { recursive: true, force: true });
 
 const reader2 = await openReader(vcfPath);

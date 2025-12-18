@@ -15,6 +15,7 @@ pub enum InfoValue {
   Array(Vec<InfoValue>),
 }
 
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormatValue {
   Absent,
@@ -137,7 +138,86 @@ impl Variant {
     Ok(())
   }
 
+  pub fn set_info_flag(&mut self, header: &Header, tag: &str, is_set: bool) -> Result<(), rust_htslib::errors::Error> {
+    let (tag_type, _) = header
+      .info_type(tag.as_bytes())
+      .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+    if tag_type != TagType::Flag {
+      return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+    }
+
+    if is_set {
+      self.record.push_info_flag(tag.as_bytes())?;
+    } else {
+      self.record.clear_info_flag(tag.as_bytes())?;
+    }
+
+    self.record.unpack();
+    Ok(())
+  }
+
+  pub fn set_info_integer(&mut self, header: &Header, tag: &str, values: &[i32]) -> Result<(), rust_htslib::errors::Error> {
+    let (tag_type, _) = header
+      .info_type(tag.as_bytes())
+      .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+    if tag_type != TagType::Integer {
+      return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+    }
+
+    self.record.push_info_integer(tag.as_bytes(), values)?;
+    self.record.unpack();
+    Ok(())
+  }
+
+  pub fn set_info_float(&mut self, header: &Header, tag: &str, values: &[f32]) -> Result<(), rust_htslib::errors::Error> {
+    let (tag_type, _) = header
+      .info_type(tag.as_bytes())
+      .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+    if tag_type != TagType::Float {
+      return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+    }
+
+    self.record.push_info_float(tag.as_bytes(), values)?;
+    self.record.unpack();
+    Ok(())
+  }
+
+  pub fn set_info_string(&mut self, header: &Header, tag: &str, values: &[String]) -> Result<(), rust_htslib::errors::Error> {
+    let (tag_type, _) = header
+      .info_type(tag.as_bytes())
+      .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+    if tag_type != TagType::String {
+      return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+    }
+
+    let refs: Vec<&[u8]> = values.iter().map(|s| s.as_bytes()).collect();
+    self.record.push_info_string(tag.as_bytes(), &refs)?;
+    self.record.unpack();
+    Ok(())
+  }
+
+  pub fn clear_info(&mut self, header: &Header, tag: &str) -> Result<(), rust_htslib::errors::Error> {
+    let (tag_type, _) = header
+      .info_type(tag.as_bytes())
+      .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+    match tag_type {
+      TagType::Flag => self.record.clear_info_flag(tag.as_bytes())?,
+      TagType::Integer => self.record.clear_info_integer(tag.as_bytes())?,
+      TagType::Float => self.record.clear_info_float(tag.as_bytes())?,
+      TagType::String => self.record.clear_info_string(tag.as_bytes())?,
+    }
+
+    self.record.unpack();
+    Ok(())
+  }
+
   pub fn info(&self, header: &Header, tag: &str) -> InfoValue {
+
     let (tag_type, tag_length) = match header.info_type(tag.as_bytes()) {
       Some(v) => v,
       None => return InfoValue::Absent,
@@ -411,6 +491,7 @@ fn header_info_values_string(
     }
   }
 }
+
 
 fn numeric_to_infovalue<T: Numeric + Copy>(
   values: Option<Vec<T>>,

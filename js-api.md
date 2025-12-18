@@ -12,6 +12,12 @@ const reader = new Reader("tests/t.vcf.gz");
 for await (const v of reader) {
   console.log(v.chrom, v.pos, v.ref, v.alt);
   console.log(v.info("DP"));
+
+  // mutate INFO fields
+  v.set_info("DP", 32);
+  v.set_info("NOTE", "hello");
+  v.set_info("SOMATIC", true);
+  v.set_info("DP", null); // clears
 }
 
 // region query (indexed input only)
@@ -109,6 +115,21 @@ export class Variant {
     | null
     | undefined;
 
+  // INFO setter (typed by header)
+  // - If `value` is null/undefined, clears the tag.
+  // - For Flag tags, `true` sets and `false` clears.
+  // - For non-Flag tags, accepts a scalar or an array.
+  set_info(
+    tag: string,
+    value:
+      | boolean
+      | number
+      | string
+      | Array<boolean | number | string>
+      | null
+      | undefined
+  ): void;
+
   // FORMAT lookup (typed, per-sample)
   // Returns an array with one entry per sample.
   // For Number=1 tags, entries are scalar; otherwise arrays.
@@ -128,6 +149,11 @@ Notes:
   - `null` when present but missing
   - `boolean | number | string | Array<...>` when present
   - When the INFO field is an array, individual missing elements are returned as `null`.
+- `Variant.set_info(tag, value)` mutates the record's `INFO` field, using the `Header` type to decide how to interpret `value`:
+  - Passing `null`/`undefined` clears the tag (the tag becomes absent).
+  - For `Type=Flag`, pass a boolean (`true` sets, `false` clears).
+  - For `Type=Integer|Float|String`, pass either a scalar or an array.
+  - If the tag is not defined in the header, it throws.
 - `Variant.format(tag)` is similar to `info()` but reads `FORMAT` and always returns per-sample values:
   - `undefined` when the tag is absent/unknown
   - Otherwise `Array<...>` with one entry per sample
