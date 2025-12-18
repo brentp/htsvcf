@@ -110,6 +110,7 @@ export class Variant {
   get ref(): string;
   get alt(): string[];
   get qual(): number | null;
+  get filter(): string[];
 
   // INFO lookup (typed)
   info(tag: string):

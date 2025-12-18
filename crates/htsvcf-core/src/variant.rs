@@ -86,6 +86,18 @@ impl Variant {
     }
   }
 
+  /// Return the FILTER column as a list of filter IDs.
+  ///
+  /// Records that are `PASS` (or '.') return an empty list.
+  pub fn filters(&self) -> Vec<String> {
+    let header = self.record.header();
+    self
+      .record
+      .filters()
+      .map(|id| String::from_utf8_lossy(&header.id_to_name(id)).into_owned())
+      .collect()
+  }
+
   pub fn info(&self, header: &Header, tag: &str) -> InfoValue {
     let (tag_type, tag_length) = match header.info_type(tag.as_bytes()) {
       Some(v) => v,

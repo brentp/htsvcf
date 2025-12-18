@@ -84,6 +84,19 @@ if (r.hasIndex()) {
 
 - `header`: methods
   - `header.records() -> Array<object>`
+    - Each record has a `type` field and additional key/value pairs parsed from the header line.
+    - `type` can be: `"INFO"`, `"FORMAT"`, `"FILTER"`, `"contig"`, `"structured"`, `"generic"`.
+    - For `type === "FILTER"`, records correspond to `##FILTER=<...>` header lines (e.g. named filters like `q10`, etc.).
+      - Example (list filter IDs defined in the header):
+
+        ```js
+        const filters = header
+          .records()
+          .filter(r => r.type === 'FILTER')
+          .map(r => r.key)
+        filters.join(',')
+        ```
+
   - `header.get(section, id) -> {id, type, number} | undefined` where `section` is `"INFO"` or `"FORMAT"`
   - `header.addInfo(id, number, type, description)`
   - `header.addFormat(id, number, type, description)`
@@ -96,6 +109,7 @@ if (r.hasIndex()) {
   - `variant.ref` (string)
   - `variant.alt` (array of strings)
   - `variant.qual` (number or `null`)
+  - `variant.filter` (array of strings)
   - `variant.info(tag)` (typed `INFO` lookup using `header`)
 
 ## Notes

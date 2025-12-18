@@ -1,9 +1,9 @@
-# htsvcf workspace
+# htsvcf workspace [![CI](https://github.com/brentp/htsvcf/actions/workflows/ci.yml/badge.svg)](https://github.com/brentp/htsvcf/actions/workflows/ci.yml)
 
-This repository is a small workspace around reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two JavaScript-related facets:
+Reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two JavaScript-related facets:
 
-1) an existing **Rust CLI** that evaluates a JavaScript expression per variant using an embedded V8 runtime
-2) an in-progress **Node-API (N-API) addon** intended for normal programmatic use from Node.js/Bun, published via an npm package
+1) a rust library that facilitates accessing variant properties with javascript expressions.
+2) a **Node-API (N-API) addon** intended for normal programmatic use from Node.js/Bun, published via an npm package
 
 ## Repo layout
 

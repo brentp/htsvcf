@@ -296,6 +296,11 @@ impl Variant {
     self.inner.qual().map(|v| v as f64)
   }
 
+  #[napi(getter)]
+  pub fn filter(&self) -> Vec<String> {
+    self.inner.filters()
+  }
+
   #[napi(js_name = "toString")]
   pub fn to_string(&self) -> napi::Result<String> {
     self

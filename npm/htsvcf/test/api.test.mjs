@@ -46,6 +46,17 @@ test("nextSync returns IteratorResult with Variant", () => {
   assert.equal(typeof rec.value.chrom, "string");
   assert.ok(rec.value.pos > 0);
 
+  assert.ok(Array.isArray(rec.value.filter));
+
+  reader.close();
+});
+
+test("Variant.filter returns empty array for PASS", () => {
+  const reader = new Reader(vcfPath);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  assert.ok(rec.value);
+  assert.deepEqual(rec.value.filter, []);
   reader.close();
 });
 

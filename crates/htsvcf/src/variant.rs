@@ -90,6 +90,18 @@ impl Variant {
             Some(qual)
         }
     }
+
+    /// Return the FILTER column as a list of filter IDs.
+    ///
+    /// Records that are `PASS` (or '.') return an empty list.
+    pub fn filters(&self) -> Vec<String> {
+        let header = self.record.header();
+        self
+            .record
+            .filters()
+            .map(|id| String::from_utf8_lossy(&header.id_to_name(id)).into_owned())
+            .collect()
+    }
 }
 
 unsafe impl v8::cppgc::GarbageCollected for Variant {
@@ -113,7 +125,7 @@ pub fn create_object_template<'a>(
     // internal field 1: JS `header` object
     object_template.set_internal_field_count(2);
 
-    for key in ["start", "pos", "stop", "chrom", "id", "ref", "alt", "qual"] {
+    for key in ["start", "pos", "stop", "chrom", "id", "ref", "alt", "qual", "filter"] {
         let name = v8::String::new(scope, key).unwrap();
         object_template.set_accessor(name.into(), attr_getter);
     }
@@ -202,6 +214,15 @@ fn attr_getter(
             Some(q) => rv.set(v8::Number::new(scope, q as f64).into()),
             None => rv.set(v8::null(scope).into()),
         },
+        b"filter" => {
+            let filters = variant
+                .filters()
+                .into_iter()
+                .map(|s| v8::String::new(scope, &s).unwrap().into())
+                .collect::<Vec<v8::Local<v8::Value>>>();
+            let arr = v8::Array::new_with_elements(scope, &filters);
+            rv.set(arr.into());
+        }
         _ => {
             let message = v8::String::new(scope, "Invalid key").unwrap();
             let error = v8::Exception::error(scope, message);
@@ -716,6 +737,8 @@ mod tests {
         assert_eq!(eval_js(&path, "variant.alt[0]"), "C");
         assert_eq!(eval_js(&path, "variant.id"), ".");
         assert_eq!(eval_js(&path, "variant.qual === null"), "true");
+        assert_eq!(eval_js(&path, "Array.isArray(variant.filter)"), "true");
+        assert_eq!(eval_js(&path, "variant.filter.length"), "0");
     }
 
     #[test]

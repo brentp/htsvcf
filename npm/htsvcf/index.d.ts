@@ -34,6 +34,7 @@ export class Variant {
   get ref(): string;
   get alt(): string[];
   get qual(): number | null;
+  get filter(): string[];
 
   info(tag: string): boolean | number | string | Array<number | string> | null | undefined;
   toString(): string;

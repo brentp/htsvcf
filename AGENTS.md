@@ -12,6 +12,7 @@ When adding or changing any public API (Reader/Header/Variant/etc.), do **all** 
 1. **Implement in the v8 binding**
    - Update the v8-side implementation in `crates/htsvcf/src/*`.
    - Ensure the JS-visible names match the existing API surface (e.g. `hasIndex`, iterator protocol, etc.).
+   - Update the `crates/htsvcf/README.md` with the new fields/methods
 
 2. **Implement in the N-API binding**
    - Update `crates/htsvcf-napi/src/lib.rs` to expose the same API.
