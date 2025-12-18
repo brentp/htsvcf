@@ -282,6 +282,14 @@ impl Variant {
     self.inner.id()
   }
 
+  #[napi(setter)]
+  pub fn set_id(&mut self, id: String) -> napi::Result<()> {
+    self
+      .inner
+      .set_id(&id)
+      .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set id: {e}")))
+  }
+
   #[napi(getter, js_name = "ref")]
   pub fn reference(&self) -> String {
     self.inner.reference()
@@ -297,9 +305,22 @@ impl Variant {
     self.inner.qual().map(|v| v as f64)
   }
 
+  #[napi(setter)]
+  pub fn set_qual(&mut self, qual: Option<f64>) {
+    self.inner.set_qual(qual.map(|v| v as f32))
+  }
+
   #[napi(getter)]
   pub fn filter(&self) -> Vec<String> {
     self.inner.filters()
+  }
+
+  #[napi(setter)]
+  pub fn set_filter(&mut self, filter: Vec<String>) -> napi::Result<()> {
+    self
+      .inner
+      .set_filters(&filter)
+      .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set filter: {e}")))
   }
 
   #[napi(js_name = "toString")]

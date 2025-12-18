@@ -78,7 +78,7 @@ Notes:
 
 ### `class Variant`
 
-A `Variant` is an immutable view of one record.
+A `Variant` is a view of one record.
 
 ```ts
 export class Variant {
@@ -92,10 +92,13 @@ export class Variant {
 
   // Core VCF fields
   get id(): string;
+  set id(v: string);
   get ref(): string;
   get alt(): string[];
   get qual(): number | null;
+  set qual(v: number | null);
   get filter(): string[];
+  set filter(v: string[]);
 
   // INFO lookup (typed)
   info(tag: string):
@@ -131,6 +134,12 @@ Notes:
   - Missing values are returned as `null` (including the VCF missing sentinel `.`)
   - `Number=1` returns scalar values per sample; other `Number`s return arrays per sample
 - `Variant.toString()` returns the formatted VCF line without a trailing newline.
+- Setters:
+  - `variant.id = "..."` updates the record ID. Setting `""` results in the VCF missing value (`.`).
+  - `variant.qual = 12.3` sets QUAL; `variant.qual = null` clears QUAL.
+  - `variant.filter = []` clears filters (equivalent to PASS when formatted).
+  - `variant.filter = ["PASS"]` is treated as clearing filters; `variant.filter` reads back as `[]`.
+  - Named filters must exist in the header (a `##FILTER=<ID=...>` definition) or setting them may throw.
 
 ### `class Header`
 

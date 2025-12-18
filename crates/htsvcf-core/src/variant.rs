@@ -71,6 +71,12 @@ impl Variant {
     String::from_utf8_lossy(&self.record.id()).into_owned()
   }
 
+  pub fn set_id(&mut self, id: &str) -> Result<(), rust_htslib::errors::Error> {
+    let id = if id.is_empty() { "." } else { id };
+    self.record.set_id(id.as_bytes())?;
+    Ok(())
+  }
+
   pub fn reference(&self) -> String {
     self.record
       .alleles()
@@ -97,16 +103,38 @@ impl Variant {
     }
   }
 
+  pub fn set_qual(&mut self, qual: Option<f32>) {
+    match qual {
+      Some(v) => self.record.set_qual(v),
+      None => self.record.set_qual(<f32 as Numeric>::missing()),
+    }
+  }
+
   /// Return the FILTER column as a list of filter IDs.
   ///
-  /// Records that are `PASS` (or '.') return an empty list.
+  /// Records that are '.' return an empty list.
   pub fn filters(&self) -> Vec<String> {
     let header = self.record.header();
-    self
-      .record
-      .filters()
-      .map(|id| String::from_utf8_lossy(&header.id_to_name(id)).into_owned())
-      .collect()
+    let mut out = Vec::new();
+    for id in self.record.filters() {
+      let name = String::from_utf8_lossy(&header.id_to_name(id)).into_owned();
+      out.push(name);
+    }
+    out
+  }
+
+  pub fn set_filters(&mut self, filters: &[String]) -> Result<(), rust_htslib::errors::Error> {
+    let want_clear = filters.len() == 1 && (filters[0] == "PASS" || filters[0] == ".");
+
+    if want_clear {
+      let refs: Vec<&[u8]> = Vec::new();
+      self.record.set_filters(&refs)?;
+      return Ok(());
+    }
+
+    let refs: Vec<&[u8]> = filters.iter().map(|s| s.as_bytes()).collect();
+    self.record.set_filters(&refs)?;
+    Ok(())
   }
 
   pub fn info(&self, header: &Header, tag: &str) -> InfoValue {

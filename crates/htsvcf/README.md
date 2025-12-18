@@ -105,11 +105,13 @@ if (r.hasIndex()) {
   - `variant.pos` (1-based integer)
   - `variant.start` (0-based integer)
   - `variant.stop` (end position)
-  - `variant.id` (string)
+  - `variant.id` (string; writable)
   - `variant.ref` (string)
   - `variant.alt` (array of strings)
-  - `variant.qual` (number or `null`)
-  - `variant.filter` (array of strings)
+  - `variant.qual` (number or `null`; writable, set `null` to clear)
+  - `variant.filter` (array of strings; writable)
+    - `variant.filter = ['PASS']` clears filters and reads back as `[]`
+    - Named filters must exist in the header (a `##FILTER=<ID=...>` definition) to set successfully
   - `variant.info(tag)` (typed `INFO` lookup using `header`)
   - `variant.format(tag)` (typed `FORMAT` lookup using `header`, returns array per sample)
 

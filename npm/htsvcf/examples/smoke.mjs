@@ -2,13 +2,29 @@ import assert from "node:assert/strict";
 import { Reader, openReader } from "htsvcf";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
+import fs from "node:fs/promises";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const vcfPath = path.join(__dirname, "..", "..", "..", "tests", "t.vcf.gz");
 
+const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-smoke-"));
+const filterVcfPath = path.join(tmpDir, "filter.vcf");
+await fs.writeFile(
+  filterVcfPath,
+  [
+    "##fileformat=VCFv4.2",
+    "##FILTER=<ID=LowQual,Description=Low Quality>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    "chr1\t10\t.\tA\tC\t.\tPASS\t.",
+    "",
+  ].join("\n"),
+);
+
 const reader = new Reader(vcfPath);
+const filterReader = new Reader(filterVcfPath);
 
 // Header methods
 assert.equal(reader.header, reader.header, "header should have stable identity");
@@ -73,6 +89,15 @@ for await (const v of reader) {
 }
 assert.ok(n > 0);
 
+// Filter setter sanity check (requires FILTER header definition)
+const it = filterReader.nextSync();
+assert.equal(it.done, false);
+assert.ok(it.value);
+assert.deepEqual(it.value.filter, []);
+
+it.value.filter = ["LowQual"];
+assert.deepEqual(it.value.filter, ["LowQual"]);
+
 if (reader.hasIndex()) {
   await reader.query("chr1:1000-2000");
   const { value, done } = await reader.next();
@@ -85,6 +110,8 @@ if (reader.hasIndex()) {
 }
 
 reader.close();
+filterReader.close();
+await fs.rm(tmpDir, { recursive: true, force: true });
 
 const reader2 = await openReader(vcfPath);
 assert.equal(reader2.hasIndex(), true);

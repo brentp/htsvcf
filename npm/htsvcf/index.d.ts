@@ -31,10 +31,13 @@ export class Variant {
   get stop(): number;
 
   get id(): string;
+  set id(v: string);
   get ref(): string;
   get alt(): string[];
   get qual(): number | null;
+  set qual(v: number | null);
   get filter(): string[];
+  set filter(v: string[]);
 
   info(tag: string): boolean | number | string | Array<number | string> | null | undefined;
   format(tag: string): Array<boolean | number | string | Array<number | string> | null> | undefined;

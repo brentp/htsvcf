@@ -60,6 +60,49 @@ test("Variant.filter returns empty array for PASS", () => {
   reader.close();
 });
 
+test("Variant setters (id/qual/filter) mutate record", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-setters-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FILTER=<ID=LowQual,Description="Low quality">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    "chr1\t1\t.\tA\tC\t.\t.\t.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  variant.id = "rs1";
+  assert.equal(variant.id, "rs1");
+
+  variant.qual = 42;
+  assert.equal(variant.qual, 42);
+
+  variant.qual = null;
+  assert.equal(variant.qual, null);
+
+  // passing PASS resets to empty filters
+  variant.filter = ["PASS"];
+  assert.deepEqual(variant.filter, []);
+
+  // filter must exist in header
+  variant.filter = ["LowQual"];
+  assert.deepEqual(variant.filter, ["LowQual"]);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
 test("Variant.format returns per-sample typed values", async () => {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");

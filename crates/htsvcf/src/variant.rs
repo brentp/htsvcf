@@ -17,7 +17,7 @@ const HEADER_INTERNAL_FIELD_INDEX: usize = 1;
 /// single iteration in [`runner::run_vcf_expr_with`].
 #[derive(Debug)]
 pub struct Variant {
-    record: bcf::Record,
+    record: v8::cppgc::GcCell<bcf::Record>,
     chrom: String,
 }
 
@@ -34,7 +34,10 @@ impl Variant {
                 .unwrap_or_else(|| ".".to_string()),
             None => ".".to_string(),
         };
-        Self { record, chrom }
+        Self {
+            record: v8::cppgc::GcCell::new(record),
+            chrom,
+        }
     }
 
     /// Chromosome/contig name.
@@ -43,28 +46,41 @@ impl Variant {
     }
 
     /// Zero-based start coordinate.
-    pub fn start(&self) -> i64 {
-        self.record.pos()
+    pub fn start(&self, scope: &v8::PinScope<'_, '_>) -> i64 {
+        self.record.get(scope).pos()
     }
 
     /// One-based POS field.
-    pub fn pos(&self) -> i64 {
-        self.record.pos() + 1
+    pub fn pos(&self, scope: &v8::PinScope<'_, '_>) -> i64 {
+        self.record.get(scope).pos() + 1
     }
 
     /// End coordinate (htslib semantics).
-    pub fn end(&self) -> i64 {
-        self.record.end()
+    pub fn end(&self, scope: &v8::PinScope<'_, '_>) -> i64 {
+        self.record.get(scope).end()
     }
 
     /// `ID` field as a string.
-    pub fn id(&self) -> String {
-        String::from_utf8_lossy(&self.record.id()).into_owned()
+    pub fn id(&self, scope: &v8::PinScope<'_, '_>) -> String {
+        String::from_utf8_lossy(&self.record.get(scope).id()).into_owned()
+    }
+
+    pub fn set_id(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        id: &str,
+    ) -> Result<(), rust_htslib::errors::Error> {
+        let id = if id.is_empty() { "." } else { id };
+        let record = self.record.get_mut(scope);
+        record.set_id(id.as_bytes())?;
+        record.unpack();
+        Ok(())
     }
 
     /// Reference allele.
-    pub fn reference(&self) -> String {
+    pub fn reference(&self, scope: &v8::PinScope<'_, '_>) -> String {
         self.record
+            .get(scope)
             .alleles()
             .first()
             .map(|a| String::from_utf8_lossy(a).into_owned())
@@ -72,8 +88,9 @@ impl Variant {
     }
 
     /// Alternate alleles.
-    pub fn alts(&self) -> Vec<String> {
+    pub fn alts(&self, scope: &v8::PinScope<'_, '_>) -> Vec<String> {
         self.record
+            .get(scope)
             .alleles()
             .into_iter()
             .skip(1)
@@ -82,8 +99,8 @@ impl Variant {
     }
 
     /// QUAL field, or `None` when missing.
-    pub fn qual(&self) -> Option<f32> {
-        let qual = self.record.qual();
+    pub fn qual(&self, scope: &v8::PinScope<'_, '_>) -> Option<f32> {
+        let qual = self.record.get(scope).qual();
         if qual.is_missing() {
             None
         } else {
@@ -91,16 +108,53 @@ impl Variant {
         }
     }
 
+    pub fn set_qual(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        qual: Option<f32>,
+    ) {
+        let record = self.record.get_mut(scope);
+        match qual {
+            Some(v) => record.set_qual(v),
+            None => record.set_qual(<f32 as Numeric>::missing()),
+        }
+    }
+
     /// Return the FILTER column as a list of filter IDs.
     ///
     /// Records that are `PASS` (or '.') return an empty list.
-    pub fn filters(&self) -> Vec<String> {
-        let header = self.record.header();
-        self
-            .record
-            .filters()
-            .map(|id| String::from_utf8_lossy(&header.id_to_name(id)).into_owned())
-            .collect()
+    pub fn filters(&self, scope: &v8::PinScope<'_, '_>) -> Vec<String> {
+        let record = self.record.get(scope);
+        let header = record.header();
+        let mut out = Vec::new();
+        for id in record.filters() {
+            let name = String::from_utf8_lossy(&header.id_to_name(id)).into_owned();
+            if name == "PASS" {
+                continue;
+            }
+            out.push(name);
+        }
+        out
+    }
+
+    pub fn set_filters(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        filters: &[String],
+    ) -> Result<(), rust_htslib::errors::Error> {
+        let record = self.record.get_mut(scope);
+        let want_clear = filters.len() == 1 && (filters[0] == "PASS" || filters[0] == ".");
+        if want_clear {
+            let refs: Vec<&[u8]> = Vec::new();
+            record.set_filters(&refs)?;
+            record.unpack();
+            return Ok(());
+        }
+
+        let refs: Vec<&[u8]> = filters.iter().map(|s| s.as_bytes()).collect();
+        record.set_filters(&refs)?;
+        record.unpack();
+        Ok(())
     }
 }
 
@@ -125,9 +179,14 @@ pub fn create_object_template<'a>(
     // internal field 1: JS `header` object
     object_template.set_internal_field_count(2);
 
-    for key in ["start", "pos", "stop", "chrom", "id", "ref", "alt", "qual", "filter"] {
+    for key in ["start", "pos", "stop", "chrom", "ref", "alt"] {
         let name = v8::String::new(scope, key).unwrap();
         object_template.set_accessor(name.into(), attr_getter);
+    }
+
+    for key in ["id", "qual", "filter"] {
+        let name = v8::String::new(scope, key).unwrap();
+        object_template.set_accessor_with_setter(name.into(), attr_getter, attr_setter);
     }
 
     let info_key = v8::String::new(scope, "info").unwrap();
@@ -184,43 +243,37 @@ fn attr_getter(
     let variant = unsafe { wrapper.as_ref() };
 
     match key.to_rust_string_lossy(scope).as_bytes() {
-        b"start" => {
-            rv.set(v8::Number::new(scope, variant.start() as f64).into());
-        }
-        b"pos" => {
-            rv.set(v8::Number::new(scope, variant.pos() as f64).into());
-        }
-        b"stop" => {
-            rv.set(v8::Number::new(scope, variant.end() as f64).into());
-        }
+        b"start" => rv.set(v8::Number::new(scope, variant.start(scope) as f64).into()),
+        b"pos" => rv.set(v8::Number::new(scope, variant.pos(scope) as f64).into()),
+        b"stop" => rv.set(v8::Number::new(scope, variant.end(scope) as f64).into()),
         b"chrom" => {
             let name_str = v8::String::new(scope, variant.chrom()).unwrap();
             rv.set(name_str.into());
         }
         b"id" => {
-            let s = v8::String::new(scope, &variant.id()).unwrap();
+            let s = v8::String::new(scope, &variant.id(scope)).unwrap();
             rv.set(s.into());
         }
         b"ref" => {
-            let s = v8::String::new(scope, &variant.reference()).unwrap();
+            let s = v8::String::new(scope, &variant.reference(scope)).unwrap();
             rv.set(s.into());
         }
         b"alt" => {
             let values = variant
-                .alts()
+                .alts(scope)
                 .into_iter()
                 .map(|s| v8::String::new(scope, &s).unwrap().into())
                 .collect::<Vec<v8::Local<v8::Value>>>();
             let arr = v8::Array::new_with_elements(scope, &values);
             rv.set(arr.into());
         }
-        b"qual" => match variant.qual() {
+        b"qual" => match variant.qual(scope) {
             Some(q) => rv.set(v8::Number::new(scope, q as f64).into()),
             None => rv.set(v8::null(scope).into()),
         },
         b"filter" => {
             let filters = variant
-                .filters()
+                .filters(scope)
                 .into_iter()
                 .map(|s| v8::String::new(scope, &s).unwrap().into())
                 .collect::<Vec<v8::Local<v8::Value>>>();
@@ -231,6 +284,80 @@ fn attr_getter(
             let message = v8::String::new(scope, "Invalid key").unwrap();
             let error = v8::Exception::error(scope, message);
             rv.set(error);
+        }
+    }
+}
+
+fn attr_setter(
+    scope: &mut v8::PinScope<'_, '_>,
+    key: v8::Local<v8::Name>,
+    value: v8::Local<v8::Value>,
+    args: v8::PropertyCallbackArguments,
+    mut _rv: v8::ReturnValue<()>,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    match key.to_rust_string_lossy(scope).as_bytes() {
+        b"id" => {
+            let Ok(v) = v8::Local::<v8::String>::try_from(value) else {
+                let msg = v8::String::new(scope, "variant.id must be a string").unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            };
+            let id = v.to_rust_string_lossy(scope);
+            if let Err(e) = variant.set_id(scope, &id) {
+                let msg = v8::String::new(scope, &format!("failed to set id: {e}"))
+                    .unwrap();
+                scope.throw_exception(v8::Exception::error(scope, msg));
+            }
+        }
+        b"qual" => {
+            if value.is_null_or_undefined() {
+                variant.set_qual(scope, None);
+                return;
+            }
+            let Ok(v) = v8::Local::<v8::Number>::try_from(value) else {
+                let msg = v8::String::new(scope, "variant.qual must be a number or null")
+                    .unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            };
+            variant.set_qual(scope, Some(v.value() as f32));
+        }
+        b"filter" => {
+            let Ok(arr) = v8::Local::<v8::Array>::try_from(value) else {
+                let msg = v8::String::new(scope, "variant.filter must be an array of strings")
+                    .unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            };
+
+            let mut filters = Vec::with_capacity(arr.length() as usize);
+            for i in 0..arr.length() {
+                let Some(v) = arr.get_index(scope, i) else {
+                    continue;
+                };
+                let Ok(s) = v8::Local::<v8::String>::try_from(v) else {
+                    let msg = v8::String::new(scope, "variant.filter must be an array of strings")
+                        .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                };
+                filters.push(s.to_rust_string_lossy(scope));
+            }
+
+            if let Err(e) = variant.set_filters(scope, &filters) {
+                let msg = v8::String::new(scope, &format!("failed to set filter: {e}"))
+                    .unwrap();
+                scope.throw_exception(v8::Exception::error(scope, msg));
+            }
+        }
+        _ => {
+            let msg = v8::String::new(scope, "Invalid key").unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
         }
     }
 }
@@ -284,9 +411,11 @@ fn info_fn(
         }
     };
 
+    let record = variant.record.get(scope);
+
     match tag_type {
         TagType::Flag => {
-            let is_set = match header_info_flag(header, &variant.record, tag_bytes) {
+            let is_set = match header_info_flag(header, record, tag_bytes) {
                 Ok(v) => v,
                 Err(_) => {
                     rv.set(v8::undefined(scope).into());
@@ -296,7 +425,7 @@ fn info_fn(
             rv.set(v8::Boolean::new(scope, is_set).into());
         }
         TagType::Integer => {
-            let values = match header_info_values_i32(header, &variant.record, tag_bytes) {
+            let values = match header_info_values_i32(header, record, tag_bytes) {
                 Ok(Some(v)) => v,
                 Ok(None) => {
                     rv.set(v8::undefined(scope).into());
@@ -313,7 +442,7 @@ fn info_fn(
             });
         }
         TagType::Float => {
-            let values = match header_info_values_f32(header, &variant.record, tag_bytes) {
+            let values = match header_info_values_f32(header, record, tag_bytes) {
                 Ok(Some(v)) => v,
                 Ok(None) => {
                     rv.set(v8::undefined(scope).into());
@@ -330,7 +459,7 @@ fn info_fn(
             });
         }
         TagType::String => {
-            let values = match header_info_values_string(header, &variant.record, tag_bytes) {
+            let values = match header_info_values_string(header, record, tag_bytes) {
                 Ok(Some(v)) => v,
                 Ok(None) => {
                     rv.set(v8::undefined(scope).into());
@@ -414,11 +543,12 @@ fn format_fn(
         }
     };
 
-    let sample_count = variant.record.sample_count() as usize;
+    let record = variant.record.get(scope);
+    let sample_count = record.sample_count() as usize;
 
     match tag_type {
         TagType::Integer => {
-            let Ok(values) = variant.record.format(tag_bytes).integer() else {
+            let Ok(values) = record.format(tag_bytes).integer() else {
                 rv.set(v8::undefined(scope).into());
                 return;
             };
@@ -451,7 +581,7 @@ fn format_fn(
             rv.set(arr.into());
         }
         TagType::Float => {
-            let Ok(values) = variant.record.format(tag_bytes).float() else {
+            let Ok(values) = record.format(tag_bytes).float() else {
                 rv.set(v8::undefined(scope).into());
                 return;
             };
@@ -484,7 +614,7 @@ fn format_fn(
             rv.set(arr.into());
         }
         TagType::String => {
-            let Ok(values) = variant.record.format(tag_bytes).string() else {
+            let Ok(values) = record.format(tag_bytes).string() else {
                 rv.set(v8::undefined(scope).into());
                 return;
             };
@@ -557,7 +687,9 @@ fn to_string_fn(
     };
 
     // bcf_unpack wants a mutable `bcf1_t*` (it mutates in-place).
-    let record_ptr = variant.record.inner() as *const rust_htslib::htslib::bcf1_t
+    // We keep the record itself in a `GcCell` (interior mutable), but the htslib
+    // functions take a raw mutable pointer.
+    let record_ptr = variant.record.get_mut(scope).inner() as *const rust_htslib::htslib::bcf1_t
         as *mut rust_htslib::htslib::bcf1_t;
 
     // vcf_format expects an unpacked record.
@@ -871,13 +1003,21 @@ mod tests {
         let record = reader.records().next().unwrap().unwrap();
         let variant = Variant::from_record(record);
 
+        let platform = crate::runtime::ensure_v8_initialized().clone();
+        let _guard = crate::runtime::v8_lock();
+        let heap = v8::cppgc::Heap::create(platform, v8::cppgc::HeapCreateParams::default());
+        let isolate = &mut v8::Isolate::new(v8::CreateParams::default().cpp_heap(heap));
+        v8::scope!(handle_scope, isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
         assert_eq!(variant.chrom(), "chr1");
-        assert_eq!(variant.pos(), 1000);
-        assert_eq!(variant.start(), 999);
-        assert_eq!(variant.end(), 1000);
-        assert_eq!(variant.id(), ".");
-        assert_eq!(variant.reference(), "A");
-        assert_eq!(variant.alts(), vec!["C".to_string()]);
+        assert_eq!(variant.pos(scope), 1000);
+        assert_eq!(variant.start(scope), 999);
+        assert_eq!(variant.end(scope), 1000);
+        assert_eq!(variant.id(scope), ".");
+        assert_eq!(variant.reference(scope), "A");
+        assert_eq!(variant.alts(scope), vec!["C".to_string()]);
     }
 
     #[test]
@@ -903,6 +1043,12 @@ mod tests {
         assert_eq!(eval_js(&path, "variant.qual === null"), "true");
         assert_eq!(eval_js(&path, "Array.isArray(variant.filter)"), "true");
         assert_eq!(eval_js(&path, "variant.filter.length"), "0");
+
+        assert_eq!(eval_js(&path, "variant.id = 'rs1'; variant.id"), "rs1");
+        assert_eq!(eval_js(&path, "variant.qual = 42; variant.qual"), "42");
+        assert_eq!(eval_js(&path, "variant.qual = null; variant.qual === null"), "true");
+
+        assert_eq!(eval_js(&path, "variant.filter = ['PASS']; variant.filter.length"), "0");
     }
 
     #[test]
