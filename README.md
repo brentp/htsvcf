@@ -2,57 +2,118 @@
 
 Reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two JavaScript-related facets:
 
-1) a rust library that facilitates accessing variant properties with javascript expressions.
-2) a **Node-API (N-API) addon** intended for normal programmatic use from Node.js/Bun, published via an npm package
+1. A Rust library + CLI that evaluates JavaScript expressions per VCF record
+2. A **Node-API addon** for programmatic use from Node.js/Bun
 
-## Repo layout
+## crates/htsvcf (CLI + V8 Library)
 
-### Rust crates (`crates/`)
+Evaluate JavaScript expressions per VCF/BCF record:
 
-- `crates/htsvcf` (library + CLI)
-  - Provides a Rust library and a CLI that evaluates a JS expression per record.
-  - Docs: `crates/htsvcf/README.md`
+```bash
+# Print chrom:pos for each variant
+cargo run --release -- tests/t.vcf.gz "variant.chrom + ':' + variant.pos"
 
-- `crates/htsvcf-core` (Rust “core” library)
-  - Shared, non-JS-facing functionality for working with readers/headers/variants.
-  - Used by the N-API addon.
+# Extract INFO field
+cargo run --release -- tests/t.vcf.gz "variant.info('DP')"
 
-- `crates/htsvcf-napi` (Node-API addon)
-  - Rust `cdylib` built with `napi-rs` v3.
-  - Exposes JS classes like `Reader`, `Variant`, and `Header` for Node/Bun.
+# Query a region (requires index)
+cargo run --release -- tests/t.vcf.gz "variant.pos" --region chr1:1000-2000
+```
 
-### JavaScript / npm package (`npm/`)
+Use as a Rust library:
 
-- `npm/htsvcf`
-  - The npm package wrapper (ESM + CJS entrypoints + TypeScript types).
-  - Includes examples and `node:test` tests.
-  - Entry points/types: `npm/htsvcf/index.js`, `npm/htsvcf/index.mjs`, `npm/htsvcf/index.d.ts`
+```rust
+use htsvcf::runner::{run_vcf_expr_with, RunOptions};
 
-## API documentation
+run_vcf_expr_with(
+    "tests/t.vcf.gz",
+    "variant.chrom + ':' + variant.pos",
+    RunOptions::default(),
+    |line| { println!("{line}"); Ok(()) },
+)?;
+```
 
-- JS API spec/proposal: `js-api.md`
-  - This is the current reference for the intended Node/Bun API surface.
-  - Includes `Variant.info(tag)` / `Variant.format(tag)` (typed INFO/FORMAT lookups).
-  - Includes `Variant.set_info(tag, value)` for mutating INFO fields (typed by header; `null` clears).
-  - `Variant.id`, `Variant.qual`, and `Variant.filter` are writable (e.g. `variant.qual = null` clears; `variant.filter = ['PASS']` clears and reads back as `[]`).
+## crates/htsvcf-napi + npm/htsvcf (Node.js/Bun)
 
-## Development notes
+Native addon for reading and manipulating VCF files from JavaScript.
+See [npm/htsvcf/examples/smoke.mjs](npm/htsvcf/examples/smoke.mjs) for a complete example.
 
-### Running Rust tests
+```javascript
+import { Reader } from "htsvcf";
 
-- `cargo test`
+const reader = new Reader("input.vcf.gz");
 
-### Building and testing the npm package
+// Async iteration
+for await (const v of reader) {
+  console.log(v.chrom, v.pos, v.ref, v.alt);
+  console.log("DP:", v.info("DP"));
+}
 
-The npm package expects a compiled native addon to be present as `npm/htsvcf/htsvcf.node`.
+// Sync iteration
+let result;
+while (!(result = reader.nextSync()).done) {
+  const v = result.value;
+  console.log(v.chrom, v.pos, v.ref, v.alt);
+}
 
-From the repo root:
+// Query a region (requires index)
+if (reader.hasIndex()) {
+  await reader.query("chr1:1000-2000");
+  for await (const v of reader) {
+    console.log(v.toString());
+  }
+}
 
-- Build the addon (release): `cargo build -p htsvcf-napi --release`
-- Copy/rename the produced shared library to `npm/htsvcf/htsvcf.node`
-  - Linux: `cp -f target/release/libhtsvcf_napi.so npm/htsvcf/htsvcf.node`
-  - macOS: `cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node`
-- Run the smoke example against the rebuilt addon:
-  - Node: `node npm/htsvcf/examples/smoke.mjs`
-  - Bun: `bun run npm/htsvcf/examples/smoke.mjs`
-- Run JS tests (Node): `npm -C npm/htsvcf test`
+// Access sample data
+for await (const v of reader) {
+  const s1 = v.sample("SAMPLE1");
+  console.log(s1.DP, s1.AD);  // { DP: 30, AD: [20, 10], sample_name: "SAMPLE1" }
+}
+
+// Modify variants
+for await (const v of reader) {
+  v.id = "rs12345";
+  v.qual = 30;
+  v.filter = ["PASS"];
+  v.set_info("DP", 100);
+}
+
+reader.close();
+```
+
+Header inspection:
+
+```javascript
+const reader = new Reader("input.vcf.gz");
+const hdr = reader.header;
+
+// Get field definitions
+hdr.get("INFO", "DP");   // { id: "DP", type: "Integer", number: "1", description: "..." }
+hdr.samples();           // ["SAMPLE1", "SAMPLE2", ...]
+
+// Add new fields
+hdr.addInfo("CUSTOM", "1", "Integer", "My custom field");
+hdr.addFormat("GT2", "1", "String", "Secondary genotype");
+```
+
+## Development
+
+### Testing
+
+```bash
+# Rust tests
+cargo test
+
+# Build and test Node-API addon
+cargo build -p htsvcf-napi --release
+cp -f target/release/libhtsvcf_napi.so npm/htsvcf/htsvcf.node   # Linux
+# cp -f target/release/libhtsvcf_napi.dylib npm/htsvcf/htsvcf.node  # macOS
+npm -C npm/htsvcf test
+```
+
+### API Documentation
+
+See `js-api.md` for the full JS API specification, including:
+- `Variant.info(tag)` / `Variant.format(tag)` for typed INFO/FORMAT lookups
+- `Variant.set_info(tag, value)` for mutating INFO fields (`null` clears)
+- Writable properties: `id`, `qual`, `filter`
