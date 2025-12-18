@@ -1,4 +1,4 @@
-# htsvcf workspace [![CI](https://github.com/brentp/htsvcf/actions/workflows/ci.yml/badge.svg)](https://github.com/brentp/htsvcf/actions/workflows/ci.yml)
+# htsvcf workspace [![CI](https://github.com/brentp/htsvcf/actions/workflows/ci.yml/badge.svg)](https://github.com/brentp/htsvcf/actions/workflows/ci.yml) [![Documentation](https://img.shields.io/badge/docs-latest-blue)](https://brentp.github.io/htsvcf/latest/htsvcf_napi/index.html)
 
 Reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two JavaScript-related facets:
 
