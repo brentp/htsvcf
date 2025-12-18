@@ -32,6 +32,7 @@ Reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two Java
 
 - JS API spec/proposal: `js-api.md`
   - This is the current reference for the intended Node/Bun API surface.
+  - Includes `Variant.info(tag)` and `Variant.format(tag)` (typed INFO/FORMAT lookups).
 
 ## Development notes
 

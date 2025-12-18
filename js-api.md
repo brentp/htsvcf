@@ -1,19 +1,4 @@
-# JS API (Bun/Node) proposal
-
-This document sketches a proposed JavaScript API for `htsvcf` that can be installed from npm and used as a normal library in **Node.js** and **Bun**, while keeping the existing Rust CLI.
-
-The implementation would be done as a **Node-API (N-API) native addon** built from Rust using [`napi-rs`](https://napi.rs/). Node-API provides a stable C ABI for native addons; Bun supports loading many Node-API addons (`.node` binaries) as well. The addon would expose classes like `Reader`, `Variant`, and `Header` directly to JS.
-
-High-level approach:
-
-- Keep the current CLI (`src/main.rs`) as-is.
-- Add a separate Rust crate/target (or feature) producing a `.node` shared library using `napi-rs`.
-- Implement a small “core” Rust layer (no `v8::*` types) that wraps `rust-htslib` readers/records/headers.
-- Implement a thin Node-API layer that exposes JS classes and methods backed by those core Rust structs.
-- Publish an npm package containing:
-  - prebuilt binaries for common platforms (and/or build-from-source fallback)
-  - a tiny JS loader that picks the correct `.node` binary at runtime
-  - the CLI entry (either shipped as a separate binary or via `bin` wrapper that spawns it)
+# JS API (Bun/Node)
 
 ## Package usage
 
@@ -121,6 +106,13 @@ export class Variant {
     | null
     | undefined;
 
+  // FORMAT lookup (typed, per-sample)
+  // Returns an array with one entry per sample.
+  // For Number=1 tags, entries are scalar; otherwise arrays.
+  format(tag: string):
+    | Array<number | string | null | Array<number | string | null>>
+    | undefined;
+
   // Format using the associated header
   toString(): string;
 }
@@ -133,6 +125,11 @@ Notes:
   - `null` when present but missing
   - `boolean | number | string | Array<...>` when present
   - When the INFO field is an array, individual missing elements are returned as `null`.
+- `Variant.format(tag)` is similar to `info()` but reads `FORMAT` and always returns per-sample values:
+  - `undefined` when the tag is absent/unknown
+  - Otherwise `Array<...>` with one entry per sample
+  - Missing values are returned as `null` (including the VCF missing sentinel `.`)
+  - `Number=1` returns scalar values per sample; other `Number`s return arrays per sample
 - `Variant.toString()` returns the formatted VCF line without a trailing newline.
 
 ### `class Header`

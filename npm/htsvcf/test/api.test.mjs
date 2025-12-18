@@ -60,6 +60,42 @@ test("Variant.filter returns empty array for PASS", () => {
   reader.close();
 });
 
+test("Variant.format returns per-sample typed values", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-format-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    '##FORMAT=<ID=AD,Number=2,Type=Integer,Description="Allele Depths">',
+    '##FORMAT=<ID=AF,Number=2,Type=Float,Description="Allele Frequencies">',
+    '##FORMAT=<ID=NOTE,Number=1,Type=String,Description="Note">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC,G\t.\t.\t.\tDP:AD:AF:NOTE\t7:1,2:0.1,0.2:hi\t.:.,.:.,.:.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  assert.deepEqual(variant.format("DP"), [7, null]);
+  assert.deepEqual(variant.format("AD"), [[1, 2], [null, null]]);
+  assert.ok(Math.abs(variant.format("AF")[0][0] - 0.1) < 1e-6);
+  assert.ok(Math.abs(variant.format("AF")[0][1] - 0.2) < 1e-6);
+  assert.deepEqual(variant.format("NOTE"), ["hi", null]);
+  assert.equal(variant.format("NOPE"), undefined);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
 test("nextSync returns done=true at EOF", () => {
   const reader = new Reader(vcfPath);
 

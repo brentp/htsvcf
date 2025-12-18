@@ -37,6 +37,7 @@ export class Variant {
   get filter(): string[];
 
   info(tag: string): boolean | number | string | Array<number | string> | null | undefined;
+  format(tag: string): Array<boolean | number | string | Array<number | string> | null> | undefined;
   toString(): string;
 }
 

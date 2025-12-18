@@ -111,6 +111,7 @@ if (r.hasIndex()) {
   - `variant.qual` (number or `null`)
   - `variant.filter` (array of strings)
   - `variant.info(tag)` (typed `INFO` lookup using `header`)
+  - `variant.format(tag)` (typed `FORMAT` lookup using `header`, returns array per sample)
 
 ## Notes
 

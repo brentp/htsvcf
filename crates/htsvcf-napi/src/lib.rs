@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use htsvcf_core as core;
+use htsvcf_core::variant::FormatValue;
 use napi::bindgen_prelude::*;
 use napi::{sys, Env};
 use napi_derive::napi;
@@ -314,6 +315,12 @@ impl Variant {
     let v = self.inner.info(&self.header, &tag);
     infovalue_to_napi_value(&env, &v)
   }
+
+  #[napi]
+  pub fn format(&self, env: Env, tag: String) -> napi::Result<sys::napi_value> {
+    let v = self.inner.format(&self.header, &tag);
+    formatvalue_to_napi_value(&env, &v)
+  }
 }
 
 #[napi]
@@ -504,6 +511,32 @@ fn infovalue_to_napi_value(env: &Env, v: &core::InfoValue) -> napi::Result<sys::
       let inner_values = values
         .iter()
         .map(|item| infovalue_to_napi_value(env, item))
+        .collect::<napi::Result<Vec<sys::napi_value>>>()?;
+      let arr = Array::from_vec(env, inner_values)?;
+      Ok(arr.raw())
+    }
+  }
+}
+
+fn formatvalue_to_napi_value(env: &Env, v: &FormatValue) -> napi::Result<sys::napi_value> {
+  match v {
+    FormatValue::Absent => unsafe { ToNapiValue::to_napi_value(env.raw(), ()) },
+    FormatValue::Missing => unsafe { ToNapiValue::to_napi_value(env.raw(), Null) },
+    FormatValue::Int(i) => unsafe { ToNapiValue::to_napi_value(env.raw(), env.create_int32(*i)?) },
+    FormatValue::Float(f) => unsafe { ToNapiValue::to_napi_value(env.raw(), env.create_double(*f as f64)?) },
+    FormatValue::String(s) => unsafe { ToNapiValue::to_napi_value(env.raw(), env.create_string(s)?) },
+    FormatValue::Array(values) => {
+      let inner_values = values
+        .iter()
+        .map(|item| formatvalue_to_napi_value(env, item))
+        .collect::<napi::Result<Vec<sys::napi_value>>>()?;
+      let arr = Array::from_vec(env, inner_values)?;
+      Ok(arr.raw())
+    }
+    FormatValue::PerSample(values) => {
+      let inner_values = values
+        .iter()
+        .map(|item| formatvalue_to_napi_value(env, item))
         .collect::<napi::Result<Vec<sys::napi_value>>>()?;
       let arr = Array::from_vec(env, inner_values)?;
       Ok(arr.raw())

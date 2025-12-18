@@ -15,6 +15,17 @@ pub enum InfoValue {
   Array(Vec<InfoValue>),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormatValue {
+  Absent,
+  Missing,
+  Int(i32),
+  Float(f32),
+  String(String),
+  Array(Vec<FormatValue>),
+  PerSample(Vec<FormatValue>),
+}
+
 #[derive(Debug)]
 pub struct Variant {
   record: bcf::Record,
@@ -125,6 +136,49 @@ impl Variant {
         Err(InfoError::Absent) => InfoValue::Absent,
         Err(InfoError::Other) => InfoValue::Absent,
       },
+    }
+  }
+
+  pub fn format(&self, header: &Header, tag: &str) -> FormatValue {
+    let (tag_type, tag_length) = match header.format_type(tag.as_bytes()) {
+      Some(v) => v,
+      None => return FormatValue::Absent,
+    };
+
+    let sample_count = self.record.sample_count() as usize;
+
+    match tag_type {
+      TagType::Integer => match self.record.format(tag.as_bytes()).integer() {
+        Ok(values) => FormatValue::PerSample(
+          values
+            .iter()
+            .take(sample_count)
+            .map(|per_sample| format_numeric_to_value(per_sample, tag_length, FormatValue::Int))
+            .collect(),
+        ),
+        Err(_) => FormatValue::Absent,
+      },
+      TagType::Float => match self.record.format(tag.as_bytes()).float() {
+        Ok(values) => FormatValue::PerSample(
+          values
+            .iter()
+            .take(sample_count)
+            .map(|per_sample| format_numeric_to_value(per_sample, tag_length, FormatValue::Float))
+            .collect(),
+        ),
+        Err(_) => FormatValue::Absent,
+      },
+      TagType::String => match self.record.format(tag.as_bytes()).string() {
+        Ok(values) => FormatValue::PerSample(
+          values
+            .iter()
+            .take(sample_count)
+            .map(|per_sample| format_string_to_value(*per_sample, tag_length))
+            .collect(),
+        ),
+        Err(_) => FormatValue::Absent,
+      },
+      TagType::Flag => FormatValue::Absent,
     }
   }
 
@@ -386,5 +440,54 @@ fn string_to_infovalue(values: Option<Vec<Vec<u8>>>, tag_length: TagLength) -> I
         })
         .collect(),
     ),
+  }
+}
+
+fn format_numeric_to_value<T: Numeric + Copy>(
+  values: &[T],
+  tag_length: TagLength,
+  scalar: impl FnOnce(T) -> FormatValue + Copy,
+) -> FormatValue {
+  match tag_length {
+    TagLength::Fixed(1) => {
+      let v = values.first().copied();
+      match v {
+        Some(v) if v.is_missing() => FormatValue::Missing,
+        Some(v) => scalar(v),
+        None => FormatValue::Missing,
+      }
+    }
+    _ => FormatValue::Array(
+      values
+        .iter()
+        .copied()
+        .map(|v| if v.is_missing() { FormatValue::Missing } else { scalar(v) })
+        .collect(),
+    ),
+  }
+}
+
+fn format_string_to_value(value: &[u8], tag_length: TagLength) -> FormatValue {
+  match tag_length {
+    TagLength::Fixed(1) => {
+      let out = String::from_utf8_lossy(value).into_owned();
+      if out.is_empty() || out == "." {
+        FormatValue::Missing
+      } else {
+        FormatValue::String(out)
+      }
+    }
+    _ => {
+      let mut parts = Vec::new();
+      for part in value.split(|c| *c == b',') {
+        let out = String::from_utf8_lossy(part).into_owned();
+        if out.is_empty() || out == "." {
+          parts.push(FormatValue::Missing);
+        } else {
+          parts.push(FormatValue::String(out));
+        }
+      }
+      FormatValue::Array(parts)
+    }
   }
 }
