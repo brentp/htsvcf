@@ -93,7 +93,7 @@ assert.ok(n > 0);
 const it = filterReader.nextSync();
 assert.equal(it.done, false);
 assert.ok(it.value);
-assert.deepEqual(it.value.filter, []);
+assert.deepEqual(it.value.filter, ["PASS"]);
 
 it.value.filter = ["LowQual"];
 assert.deepEqual(it.value.filter, ["LowQual"]);
