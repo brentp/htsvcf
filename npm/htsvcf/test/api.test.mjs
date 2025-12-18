@@ -51,7 +51,7 @@ test("nextSync returns IteratorResult with Variant", () => {
   reader.close();
 });
 
-test("Variant.filter returns empty array for PASS", () => {
+test("Variant.filter returns empty array for no filter", () => {
   const reader = new Reader(vcfPath);
   const rec = reader.nextSync();
   assert.equal(rec.done, false);
@@ -93,7 +93,9 @@ test("Variant setters (id/qual/filter) mutate record", async () => {
 
   // passing PASS resets to empty filters
   variant.filter = ["PASS"];
-  assert.deepEqual(variant.filter, []);
+  assert.deepEqual(variant.filter, ["PASS"]);
+  variant.filter = ["LowQual"];
+  assert.deepEqual(variant.filter, ["LowQual"]);
 
   // filter must exist in header
   variant.filter = ["LowQual"];
