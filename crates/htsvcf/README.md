@@ -101,22 +101,90 @@ if (r.hasIndex()) {
   - `header.samples() -> Array<string>` returns the list of sample names from the header
   - `header.addInfo(id, number, type, description)`
   - `header.addFormat(id, number, type, description)`
-- `variant`: fields/methods
-  - `variant.chrom` (string)
-  - `variant.pos` (1-based integer)
-  - `variant.start` (0-based integer)
-  - `variant.stop` (end position)
-  - `variant.id` (string; writable)
-  - `variant.ref` (string)
-  - `variant.alt` (array of strings)
-  - `variant.qual` (number or `null`; writable, set `null` to clear)
-  - `variant.filter` (array of strings; writable)
-    - `variant.filter = ['PASS']` clears filters and reads back as `[]`
-    - Named filters must exist in the header (a `##FILTER=<ID=...>` definition) to set successfully
-- `variant.info(tag)` (typed `INFO` lookup using `header`)
-- `variant.set_info(tag, value)` (mutate INFO; typed by `header`, `null`/`undefined` clears)
-- `variant.format(tag)` (typed `FORMAT` lookup using `header`, returns array per sample)
-- `variant.sample(name)` (return an object of typed `FORMAT` values for a single sample name; includes `.sample_name`)
+- `variant`: a VCF/BCF record with fields and methods
+
+### Variant Attributes
+
+```javascript
+// Core fields (read-only)
+variant.chrom   // string - chromosome/contig name
+variant.pos     // number - 1-based position (VCF POS column)
+variant.start   // number - 0-based start coordinate
+variant.stop    // number - end position
+variant.ref     // string - reference allele
+variant.alt     // string[] - array of alternate alleles
+
+// Writable fields
+variant.id      // string - variant ID (writable)
+variant.qual    // number | null - quality score (writable, set null to clear)
+variant.filter  // string[] - array of filter IDs (writable)
+
+// INFO field access
+variant.info(tag)              // get typed INFO value (uses header for type info)
+variant.set_info(tag, value)   // set INFO value (null/undefined clears the tag)
+
+// FORMAT/genotype field access
+variant.format(tag)            // get typed FORMAT values as array (one per sample)
+variant.sample(name)           // get all FORMAT fields for a single sample as object
+variant.samples()              // get all FORMAT fields for all samples as array of objects
+variant.samples(['S1', 'S2'])  // get FORMAT fields for a subset of samples
+
+// Serialization
+variant.toString()             // format record as VCF line (without newline)
+```
+
+### Variant Examples
+
+```javascript
+// Basic field access
+variant.chrom + ':' + variant.pos        // "chr1:1000"
+variant.ref + '>' + variant.alt.join(',') // "A>C,G"
+
+// Modify variant ID and quality
+variant.id = 'rs12345'
+variant.qual = 30.5
+variant.qual = null  // clear quality
+
+// Work with filters
+variant.filter = ['PASS']    // set to PASS (reads back as [])
+variant.filter = ['q10']     // set named filter (must exist in header)
+variant.filter = []          // clear all filters
+
+// INFO field access (typed by header)
+variant.info('DP')           // 10 (Integer, Number=1 → scalar)
+variant.info('AF')           // [0.1, 0.2] (Float, Number=A → array)
+variant.info('SOMATIC')      // true (Flag type)
+variant.info('MISSING')      // undefined (tag not present)
+
+// Modify INFO fields
+variant.set_info('DP', 42)
+variant.set_info('AF', [0.25, 0.75])
+variant.set_info('SOMATIC', true)
+variant.set_info('DP', null)  // remove the tag
+
+// FORMAT field access (returns array, one value per sample)
+variant.format('GT')         // [[0, 1], [1, 1]] (genotypes per sample)
+variant.format('DP')         // [20, 15] (depth per sample)
+variant.format('AD')         // [[10, 10], [5, 10]] (allele depths per sample)
+
+// Single sample access (returns object with all FORMAT fields)
+const s = variant.sample('NA12878')
+s.sample_name                // "NA12878"
+s.GT                         // [0, 1]
+s.DP                         // 20
+s.AD                         // [10, 10]
+
+// All samples at once
+const all = variant.samples()
+all[0].sample_name           // first sample name
+all[0].DP                    // first sample's depth
+
+// Subset of samples
+const subset = variant.samples(['NA12878', 'NA12879'])
+
+// Output as VCF line
+variant.toString()           // "chr1\t1000\t.\tA\tC\t30\tPASS\tDP=10\t..."
+```
 
 
 ## Notes

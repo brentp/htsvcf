@@ -76,7 +76,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download Linux artifact
@@ -95,4 +95,9 @@ jobs:
           npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version
 
       - name: Publish to npm
-        run: npm -C npm/htsvcf publish --provenance --access public
+        run: |
+            cd npm/htsvcf 
+            # npm run build --if-present
+            # npm install
+            # npm ci
+            npm publish --provenance --access public
