@@ -115,6 +115,7 @@ if (r.hasIndex()) {
 - `variant.info(tag)` (typed `INFO` lookup using `header`)
 - `variant.set_info(tag, value)` (mutate INFO; typed by `header`, `null`/`undefined` clears)
 - `variant.format(tag)` (typed `FORMAT` lookup using `header`, returns array per sample)
+- `variant.sample(name)` (return an object of typed `FORMAT` values for a single sample name; includes `.sample_name`)
 
 
 ## Notes

@@ -343,6 +343,21 @@ impl Variant {
     formatvalue_to_napi_value(&env, &v)
   }
 
+  #[napi]
+  pub fn sample(&self, env: Env, name: String) -> napi::Result<sys::napi_value> {
+    let Some(fields) = self.inner.sample(&self.header, &name) else {
+      return unsafe { ToNapiValue::to_napi_value(env.raw(), ()) };
+    };
+
+    let mut out: Object<'static> = Object::new(&env)?;
+    for (tag, value) in fields {
+      let js_value = formatvalue_to_napi_value(&env, &value)?;
+      out.set_named_property(tag.as_str(), unsafe { Unknown::from_raw_unchecked(env.raw(), js_value) })?;
+    }
+
+    Ok(out.raw())
+  }
+
   #[napi(js_name = "set_info")]
   pub fn set_info(&mut self, tag: String, value: Unknown) -> napi::Result<()> {
     use napi::ValueType;

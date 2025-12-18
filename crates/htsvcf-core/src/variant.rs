@@ -290,6 +290,52 @@ impl Variant {
     }
   }
 
+  pub fn sample(&self, header: &Header, sample: &str) -> Option<Vec<(String, FormatValue)>> {
+    let sample_id = header.sample_id(sample.as_bytes())?;
+    let sample_count = self.record.sample_count() as usize;
+    if sample_id >= sample_count {
+      return None;
+    }
+
+    let record_ptr = self.record.inner() as *const rust_htslib::htslib::bcf1_t
+      as *mut rust_htslib::htslib::bcf1_t;
+
+    // Ensure FORMAT is unpacked so `d.fmt` is populated.
+    let _ = unsafe { rust_htslib::htslib::bcf_unpack(record_ptr, rust_htslib::htslib::BCF_UN_FMT as i32) };
+
+    let n_fmt = unsafe { (*record_ptr).n_fmt() as usize };
+    let fmt_ptr = unsafe { (*record_ptr).d.fmt };
+
+    let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(n_fmt.saturating_add(1));
+
+    if !fmt_ptr.is_null() && n_fmt != 0 {
+      for i in 0..n_fmt {
+        let fmt = unsafe { *fmt_ptr.add(i) };
+        let tag_name_bytes = header.id_to_name(fmt.id as u32);
+        let tag_name = match std::str::from_utf8(&tag_name_bytes) {
+          Ok(s) => s,
+          Err(_) => continue,
+        };
+
+        let Some(value) = format_value_for_sample(header, &self.record, &tag_name_bytes, sample_id) else {
+          continue;
+        };
+
+        out.push((tag_name.to_string(), value));
+      }
+    }
+
+    // Include the sample name so JS bindings can expose it.
+    // Set it last so it can't be overwritten by a FORMAT tag.
+    out.push((
+      "sample_name".to_string(),
+      FormatValue::String(sample.to_string()),
+    ));
+
+    Some(out)
+  }
+
+
   pub fn to_string(&self, header: &Header) -> Option<String> {
     let mut s = rust_htslib::htslib::kstring_t {
       l: 0,
@@ -598,5 +644,75 @@ fn format_string_to_value(value: &[u8], tag_length: TagLength) -> FormatValue {
       }
       FormatValue::Array(parts)
     }
+  }
+}
+
+fn format_value_for_sample(
+  header: &Header,
+  record: &bcf::Record,
+  tag: &[u8],
+  sample_id: usize,
+) -> Option<FormatValue> {
+  let (tag_type, tag_length) = header.format_type(tag)?;
+
+  match tag_type {
+    TagType::Integer => {
+      let values = record.format(tag).integer().ok()?;
+      let per_sample = values.get(sample_id)?;
+      Some(format_numeric_to_value(per_sample, tag_length, FormatValue::Int))
+    }
+    TagType::Float => {
+      let values = record.format(tag).float().ok()?;
+      let per_sample = values.get(sample_id)?;
+      Some(format_numeric_to_value(per_sample, tag_length, FormatValue::Float))
+    }
+    TagType::String => {
+      let values = record.format(tag).string().ok()?;
+      let per_sample = values.get(sample_id)?;
+      Some(format_string_to_value(*per_sample, tag_length))
+    }
+    TagType::Flag => None,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use rust_htslib::bcf::Read;
+
+  #[test]
+  fn sample_includes_sample_name_and_overrides_format_tag() {
+    let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##FORMAT=<ID=sample_name,Number=1,Type=String,Description=\"Should not override\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tDP:sample_name\t7:EVIL\n";
+
+    let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let vcf_path = tmp_dir.join("sample-name.vcf");
+    std::fs::write(&vcf_path, vcf).unwrap();
+
+    let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+    let header = unsafe { Header::new(reader.header().inner) };
+
+    let mut rec = reader.empty_record();
+    let _ = reader.read(&mut rec).unwrap();
+    let variant = Variant::from_record(rec);
+
+    let fields = variant.sample(&header, "S1").expect("sample exists");
+    let mut map = std::collections::HashMap::new();
+    for (k, v) in fields {
+      map.insert(k, v);
+    }
+
+    assert_eq!(map.get("DP"), Some(&FormatValue::Int(7)));
+    assert_eq!(
+      map.get("sample_name"),
+      Some(&FormatValue::String("S1".to_string()))
+    );
+
+    let _ = std::fs::remove_file(&vcf_path);
   }
 }

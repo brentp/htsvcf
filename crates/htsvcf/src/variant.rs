@@ -4,6 +4,14 @@ use rust_htslib::bcf::header::{TagLength, TagType};
 use rust_htslib::bcf::record::Numeric;
 use std::ffi::CString;
 
+#[derive(Debug, Clone, PartialEq)]
+enum OwnedFormatValue {
+    Null,
+    Number(f64),
+    String(String),
+    Array(Vec<OwnedFormatValue>),
+}
+
 pub const TAG: u16 = 1;
 const VARIANT_TYPE_NAME: &[u8] = b"Variant\0";
 
@@ -197,6 +205,10 @@ pub fn create_object_template<'a>(
     let format_key = v8::String::new(scope, "format").unwrap();
     let format_template = v8::FunctionTemplate::new(scope, format_fn);
     object_template.set(format_key.into(), format_template.into());
+
+    let sample_key = v8::String::new(scope, "sample").unwrap();
+    let sample_template = v8::FunctionTemplate::new(scope, sample_fn);
+    object_template.set(sample_key.into(), sample_template.into());
 
     let to_string_key = v8::String::new(scope, "toString").unwrap();
     let to_string_template = v8::FunctionTemplate::new(scope, to_string_fn);
@@ -739,124 +751,291 @@ fn format_fn(
             .expect("Failed to unwrap Header");
     let header: &header::Header = unsafe { header_wrapper.as_ref() };
 
-    let (tag_type, tag_length) = match header.format_type(tag_bytes) {
-        Some(v) => v,
-        None => {
+    let values = {
+        let record_ref = variant.record.get(scope);
+        let sample_count = record_ref.sample_count() as usize;
+        match format_as_owned_per_sample(header, record_ref, tag_bytes, sample_count) {
+            Some(v) => v,
+            None => {
+                rv.set(v8::undefined(scope).into());
+                return;
+            }
+        }
+    };
+
+    let arr = v8::Array::new(scope, values.len() as i32);
+    for (i, value) in values.into_iter().enumerate() {
+        let v = owned_to_v8(scope, value);
+        arr.set_index(scope, i as u32, v);
+    }
+
+    rv.set(arr.into());
+}
+
+fn owned_to_v8<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    value: OwnedFormatValue,
+) -> v8::Local<'s, v8::Value> {
+    match value {
+        OwnedFormatValue::Null => v8::null(scope).into(),
+        OwnedFormatValue::Number(v) => v8::Number::new(scope, v).into(),
+        OwnedFormatValue::String(s) => v8::String::new(scope, &s).unwrap().into(),
+        OwnedFormatValue::Array(values) => {
+            let arr = v8::Array::new(scope, values.len() as i32);
+            for (i, v) in values.into_iter().enumerate() {
+                let v = owned_to_v8(scope, v);
+                arr.set_index(scope, i as u32, v);
+            }
+            arr.into()
+        }
+    }
+}
+
+fn format_as_owned_per_sample(
+    header: &header::Header,
+    record: &bcf::Record,
+    tag_bytes: &[u8],
+    sample_count: usize,
+) -> Option<Vec<OwnedFormatValue>> {
+    let (tag_type, tag_length) = header.format_type(tag_bytes)?;
+
+    match tag_type {
+        TagType::Integer => {
+            let values = record.format(tag_bytes).integer().ok()?;
+            let mut out = Vec::with_capacity(sample_count);
+            for per_sample in values.iter().take(sample_count) {
+                out.push(format_per_sample_numeric_owned(
+                    per_sample,
+                    tag_length,
+                    |v| v.is_missing(),
+                    |v| v as f64,
+                ));
+            }
+            Some(out)
+        }
+        TagType::Float => {
+            let values = record.format(tag_bytes).float().ok()?;
+            let mut out = Vec::with_capacity(sample_count);
+            for per_sample in values.iter().take(sample_count) {
+                out.push(format_per_sample_numeric_owned(
+                    per_sample,
+                    tag_length,
+                    |v| v.is_missing(),
+                    |v| v as f64,
+                ));
+            }
+            Some(out)
+        }
+        TagType::String => {
+            let values = record.format(tag_bytes).string().ok()?;
+            let mut out = Vec::with_capacity(sample_count);
+            for per_sample in values.iter().take(sample_count) {
+                out.push(format_per_sample_string_owned(per_sample, tag_length));
+            }
+            Some(out)
+        }
+        TagType::Flag => None,
+    }
+}
+
+fn format_per_sample_numeric_owned<T: Copy>(
+    values: &[T],
+    tag_length: TagLength,
+    mut is_missing: impl FnMut(T) -> bool,
+    mut to_f64: impl FnMut(T) -> f64,
+) -> OwnedFormatValue {
+    match tag_length {
+        TagLength::Fixed(1) => {
+            let v = values.first().copied();
+            match v {
+                Some(v) if is_missing(v) => OwnedFormatValue::Null,
+                Some(v) => OwnedFormatValue::Number(to_f64(v)),
+                None => OwnedFormatValue::Null,
+            }
+        }
+        _ => {
+            let mut inner = Vec::with_capacity(values.len());
+            for v in values.iter().copied() {
+                if is_missing(v) {
+                    inner.push(OwnedFormatValue::Null);
+                } else {
+                    inner.push(OwnedFormatValue::Number(to_f64(v)));
+                }
+            }
+            OwnedFormatValue::Array(inner)
+        }
+    }
+}
+
+fn format_per_sample_string_owned(value: &[u8], tag_length: TagLength) -> OwnedFormatValue {
+    match tag_length {
+        TagLength::Fixed(1) => {
+            let s = String::from_utf8_lossy(value).into_owned();
+            if s.is_empty() || s == "." {
+                OwnedFormatValue::Null
+            } else {
+                OwnedFormatValue::String(s)
+            }
+        }
+        _ => {
+            let parts: Vec<_> = value.split(|c| *c == b',').collect();
+            let mut inner = Vec::with_capacity(parts.len());
+            for part in parts {
+                let s = String::from_utf8_lossy(part).into_owned();
+                if s.is_empty() || s == "." {
+                    inner.push(OwnedFormatValue::Null);
+                } else {
+                    inner.push(OwnedFormatValue::String(s));
+                }
+            }
+            OwnedFormatValue::Array(inner)
+        }
+    }
+}
+
+fn format_as_owned_for_sample(
+    header: &header::Header,
+    record: &bcf::Record,
+    tag_bytes: &[u8],
+    sample_id: usize,
+) -> Option<OwnedFormatValue> {
+    let (tag_type, tag_length) = header.format_type(tag_bytes)?;
+
+    match tag_type {
+        TagType::Integer => {
+            let values = record.format(tag_bytes).integer().ok()?;
+            let per_sample = values.get(sample_id)?;
+            Some(format_per_sample_numeric_owned(
+                per_sample,
+                tag_length,
+                |v| v.is_missing(),
+                |v| v as f64,
+            ))
+        }
+        TagType::Float => {
+            let values = record.format(tag_bytes).float().ok()?;
+            let per_sample = values.get(sample_id)?;
+            Some(format_per_sample_numeric_owned(
+                per_sample,
+                tag_length,
+                |v| v.is_missing(),
+                |v| v as f64,
+            ))
+        }
+        TagType::String => {
+            let values = record.format(tag_bytes).string().ok()?;
+            let per_sample = values.get(sample_id)?;
+            Some(format_per_sample_string_owned(per_sample, tag_length))
+        }
+        TagType::Flag => None,
+    }
+}
+
+fn sample_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    if args.length() < 1 {
+        rv.set(v8::undefined(scope).into());
+        return;
+    }
+
+    let Ok(sample_str) = v8::Local::<v8::String>::try_from(args.get(0)) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    let sample_name = sample_str.to_rust_string_lossy(scope);
+
+    let Some(header_data) = this.get_internal_field(scope, HEADER_INTERNAL_FIELD_INDEX) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    let Ok(header_obj) = v8::Local::<v8::Object>::try_from(header_data) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+
+    let header_wrapper =
+        unsafe { v8::Object::unwrap::<{ header::HEADER_TAG }, header::Header>(scope, header_obj) }
+            .expect("Failed to unwrap Header");
+    let header: &header::Header = unsafe { header_wrapper.as_ref() };
+
+    // Resolve sample index from header -> this matches the sample order in the record.
+    let view = std::mem::ManuallyDrop::new(bcf::header::HeaderView::new(header.inner_ptr()));
+    let sample_id = match view.sample_to_id(sample_name.as_bytes()) {
+        Ok(id) => id.0 as usize,
+        Err(_) => {
             rv.set(v8::undefined(scope).into());
             return;
         }
     };
 
-    let record = variant.record.get(scope);
-    let sample_count = record.sample_count() as usize;
+    let values_by_tag: Option<Vec<(String, OwnedFormatValue)>> = {
+        let record_ref = variant.record.get(scope);
+        let sample_count = record_ref.sample_count() as usize;
+        if sample_id >= sample_count {
+            None
+        } else {
+            let record_ptr = record_ref.inner() as *const rust_htslib::htslib::bcf1_t
+                as *mut rust_htslib::htslib::bcf1_t;
+            unsafe {
+                rust_htslib::htslib::bcf_unpack(
+                    record_ptr,
+                    rust_htslib::htslib::BCF_UN_FMT as i32,
+                );
+            }
 
-    match tag_type {
-        TagType::Integer => {
-            let Ok(values) = record.format(tag_bytes).integer() else {
-                rv.set(v8::undefined(scope).into());
-                return;
-            };
-            let arr = v8::Array::new(scope, sample_count as i32);
-            for (i, per_sample) in values.iter().take(sample_count).enumerate() {
-                match tag_length {
-                    TagLength::Fixed(1) => {
-                        let v = per_sample.first().copied();
-                        let out = match v {
-                            Some(v) if v.is_missing() => v8::null(scope).into(),
-                            Some(v) => v8::Number::new(scope, v as f64).into(),
-                            None => v8::null(scope).into(),
-                        };
-                        arr.set_index(scope, i as u32, out);
-                    }
-                    _ => {
-                        let inner = v8::Array::new(scope, per_sample.len() as i32);
-                        for (j, v) in per_sample.iter().copied().enumerate() {
-                            let out = if v.is_missing() {
-                                v8::null(scope).into()
-                            } else {
-                                v8::Number::new(scope, v as f64).into()
-                            };
-                            inner.set_index(scope, j as u32, out);
-                        }
-                        arr.set_index(scope, i as u32, inner.into());
-                    }
+            let n_fmt = unsafe { (*record_ptr).n_fmt() as usize };
+            let fmt_ptr = unsafe { (*record_ptr).d.fmt };
+            if fmt_ptr.is_null() || n_fmt == 0 {
+                Some(Vec::new())
+            } else {
+                let mut out = Vec::with_capacity(n_fmt);
+                for i in 0..n_fmt {
+                    let fmt = unsafe { *fmt_ptr.add(i) };
+                    let tag_name_bytes = view.id_to_name(bcf::header::Id(fmt.id as u32));
+                    let Ok(tag_name) = std::str::from_utf8(&tag_name_bytes) else {
+                        continue;
+                    };
+
+                    let Some(sample_value) =
+                        format_as_owned_for_sample(header, record_ref, &tag_name_bytes, sample_id)
+                    else {
+                        continue;
+                    };
+                    out.push((tag_name.to_string(), sample_value));
                 }
+                Some(out)
             }
-            rv.set(arr.into());
         }
-        TagType::Float => {
-            let Ok(values) = record.format(tag_bytes).float() else {
-                rv.set(v8::undefined(scope).into());
-                return;
-            };
-            let arr = v8::Array::new(scope, sample_count as i32);
-            for (i, per_sample) in values.iter().take(sample_count).enumerate() {
-                match tag_length {
-                    TagLength::Fixed(1) => {
-                        let v = per_sample.first().copied();
-                        let out = match v {
-                            Some(v) if v.is_missing() => v8::null(scope).into(),
-                            Some(v) => v8::Number::new(scope, v as f64).into(),
-                            None => v8::null(scope).into(),
-                        };
-                        arr.set_index(scope, i as u32, out);
-                    }
-                    _ => {
-                        let inner = v8::Array::new(scope, per_sample.len() as i32);
-                        for (j, v) in per_sample.iter().copied().enumerate() {
-                            let out = if v.is_missing() {
-                                v8::null(scope).into()
-                            } else {
-                                v8::Number::new(scope, v as f64).into()
-                            };
-                            inner.set_index(scope, j as u32, out);
-                        }
-                        arr.set_index(scope, i as u32, inner.into());
-                    }
-                }
-            }
-            rv.set(arr.into());
-        }
-        TagType::String => {
-            let Ok(values) = record.format(tag_bytes).string() else {
-                rv.set(v8::undefined(scope).into());
-                return;
-            };
-            let arr = v8::Array::new(scope, sample_count as i32);
-            for (i, per_sample) in values.iter().take(sample_count).enumerate() {
-                match tag_length {
-                    TagLength::Fixed(1) => {
-                        let s = String::from_utf8_lossy(per_sample).into_owned();
-                        let out = if s.is_empty() || s == "." {
-                            v8::null(scope).into()
-                        } else {
-                            v8::String::new(scope, &s).unwrap().into()
-                        };
-                        arr.set_index(scope, i as u32, out);
-                    }
-                    _ => {
-                        let parts: Vec<_> = per_sample.split(|c| *c == b',').collect();
-                        let inner = v8::Array::new(scope, parts.len() as i32);
-                        for (j, part) in parts.iter().enumerate() {
-                            let s = String::from_utf8_lossy(part).into_owned();
-                            let out = if s.is_empty() || s == "." {
-                                v8::null(scope).into()
-                            } else {
-                                v8::String::new(scope, &s).unwrap().into()
-                            };
-                            inner.set_index(scope, j as u32, out);
-                        }
-                        arr.set_index(scope, i as u32, inner.into());
-                    }
-                }
-            }
-            rv.set(arr.into());
-        }
-        TagType::Flag => {
-            // Flag isn't valid for FORMAT in practice; expose undefined.
-            rv.set(v8::undefined(scope).into());
-        }
+    };
+
+    let Some(mut values_by_tag) = values_by_tag else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+
+    // Set this last so it can't get overwritten by a FORMAT tag.
+    values_by_tag.push((
+        "sample_name".to_string(),
+        OwnedFormatValue::String(sample_name.clone()),
+    ));
+
+    let out = v8::Object::new(scope);
+
+    for (tag, value) in values_by_tag {
+        let key = v8::String::new(scope, &tag).unwrap();
+        let v = owned_to_v8(scope, value);
+        out.set(scope, key.into(), v);
     }
+
+    rv.set(out.into());
 }
 
 /// V8 callback for `variant.toString()`. 
@@ -1260,14 +1439,14 @@ mod tests {
     fn test_variant_info_uses_header_type_and_number() {
         let path = tmp_path("info.vcf");
         let vcf = "##fileformat=VCFv4.2\n\
-  ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
-  ##INFO=<ID=AF,Number=2,Type=Float,Description=\"Allele frequencies\">\n\
-  ##INFO=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
-  ##INFO=<ID=FLAGS,Number=.,Type=String,Description=\"Flags\">\n\
-  ##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic\">\n\
-  ##contig=<ID=chr1>\n\
-  #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
-  chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##INFO=<ID=AF,Number=2,Type=Float,Description=\"Allele frequencies\">\n\
+##INFO=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
+##INFO=<ID=FLAGS,Number=.,Type=String,Description=\"Flags\">\n\
+##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
         fs::write(&path, vcf).unwrap();
         let path = path.to_str().unwrap();
 
@@ -1336,13 +1515,13 @@ mod tests {
     fn test_variant_format_per_sample() {
         let path = tmp_path("format.vcf");
         let vcf = "##fileformat=VCFv4.2\n\
-##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
-##FORMAT=<ID=AD,Number=2,Type=Integer,Description=\"Allele Depths\">\n\
-##FORMAT=<ID=AF,Number=2,Type=Float,Description=\"Allele Frequencies\">\n\
-##FORMAT=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
-##contig=<ID=chr1>\n\
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
-chr1\t1\t.\tA\tC,G\t.\t.\t.\tDP:AD:AF:NOTE\t7:1,2:0.1,0.2:hi\t.:.,.:.,.:.\n";
+ ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+ ##FORMAT=<ID=AD,Number=2,Type=Integer,Description=\"Allele Depths\">\n\
+ ##FORMAT=<ID=AF,Number=2,Type=Float,Description=\"Allele Frequencies\">\n\
+ ##FORMAT=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
+ ##contig=<ID=chr1>\n\
+ #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+ chr1\t1\t.\tA\tC,G\t.\t.\t.\tDP:AD:AF:NOTE\t7:1,2:0.1,0.2:hi\t.:.,.:.,.:.\n";
 
         fs::write(&path, vcf).unwrap();
         let path = path.to_str().unwrap();
@@ -1368,8 +1547,21 @@ chr1\t1\t.\tA\tC,G\t.\t.\t.\tDP:AD:AF:NOTE\t7:1,2:0.1,0.2:hi\t.:.,.:.,.:.\n";
         assert_eq!(eval_js(path, "variant.format('NOTE')[1] === null"), "true");
         assert_eq!(eval_js(path, "variant.format('NOPE')"), "undefined");
 
+        // sample(name) returns a keyed object with only that sample's values.
+        assert_eq!(eval_js(path, "variant.sample('S1').sample_name"), "S1");
+        assert_eq!(eval_js(path, "variant.sample('S1').DP"), "7");
+        assert_eq!(eval_js(path, "variant.sample('S1').AD[1]"), "2");
+        assert_eq!(
+            eval_js(path, "Math.abs(variant.sample('S1').AF[0] - 0.1) < 1e-6"),
+            "true"
+        );
+        assert_eq!(eval_js(path, "variant.sample('S2').DP === null"), "true");
+        assert_eq!(eval_js(path, "variant.sample('S2').AD[0] === null"), "true");
+        assert_eq!(eval_js(path, "variant.sample('NOPE')"), "undefined");
+
         let _ = fs::remove_file(path);
     }
+
 
     #[test]
     /// `variant.toString()` should return the formatted VCF line.

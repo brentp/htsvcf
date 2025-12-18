@@ -39,9 +39,24 @@ await fs.writeFile(
   ].join("\n"),
 );
 
+const sampleVcfPath = path.join(tmpDir, "sample.vcf");
+await fs.writeFile(
+  sampleVcfPath,
+  [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">',
+    '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allele Depth">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t10\t.\tA\tC\t.\tPASS\t.\tDP:AD\t11:8,3\t.:.,.",
+    "",
+  ].join("\n"),
+);
+
 const reader = new Reader(vcfPath);
 const filterReader = new Reader(filterVcfPath);
 const setInfoReader = new Reader(setInfoVcfPath);
+const sampleReader = new Reader(sampleVcfPath);
 
 // Header methods
 assert.equal(reader.header, reader.header, "header should have stable identity");
@@ -122,6 +137,26 @@ assert.ok(it2.value);
 assert.equal(it2.value.info("DP"), 10);
 assert.equal(it2.value.info("NOTE"), "hello");
 
+// Variant.sample(name) sanity check
+const it3 = sampleReader.nextSync();
+assert.equal(it3.done, false);
+assert.ok(it3.value);
+
+const s1 = it3.value.sample("S1");
+assert.ok(s1);
+assert.equal(s1.sample_name, "S1");
+assert.equal(s1.DP, 11);
+assert.deepEqual(s1.AD, [8, 3]);
+
+const s2 = it3.value.sample("S2");
+assert.ok(s2);
+assert.equal(s2.sample_name, "S2");
+assert.equal(s2.DP, null);
+assert.deepEqual(s2.AD, [null, null]);
+
+assert.equal(it3.value.sample("NOPE"), undefined);
+console.log("sample(S1):", s1);
+
 it2.value.set_info("DP", 32);
 assert.equal(it2.value.info("DP"), 32);
 
@@ -148,6 +183,7 @@ if (reader.hasIndex()) {
 reader.close();
 filterReader.close();
 setInfoReader.close();
+sampleReader.close();
 await fs.rm(tmpDir, { recursive: true, force: true });
 
 const reader2 = await openReader(vcfPath);

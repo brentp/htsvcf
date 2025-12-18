@@ -137,6 +137,25 @@ test("Variant.format returns per-sample typed values", async () => {
   assert.deepEqual(variant.format("NOTE"), ["hi", null]);
   assert.equal(variant.format("NOPE"), undefined);
 
+  const s1 = variant.sample("S1");
+  assert.ok(s1);
+  assert.equal(s1.sample_name, "S1");
+  assert.equal(s1.DP, 7);
+  assert.deepEqual(s1.AD, [1, 2]);
+  assert.ok(Math.abs(s1.AF[0] - 0.1) < 1e-6);
+  assert.ok(Math.abs(s1.AF[1] - 0.2) < 1e-6);
+  assert.equal(s1.NOTE, "hi");
+
+  const s2 = variant.sample("S2");
+  assert.ok(s2);
+  assert.equal(s2.sample_name, "S2");
+  assert.equal(s2.DP, null);
+  assert.deepEqual(s2.AD, [null, null]);
+  assert.deepEqual(s2.AF, [null, null]);
+  assert.equal(s2.NOTE, null);
+
+  assert.equal(variant.sample("NOPE"), undefined);
+
   reader.close();
   await fs.rm(tmp, { recursive: true, force: true });
 });

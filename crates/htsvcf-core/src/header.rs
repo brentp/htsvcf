@@ -58,6 +58,17 @@ impl Header {
     self.view().header_records()
   }
 
+  pub fn sample_id(&self, sample: &[u8]) -> Option<usize> {
+    match self.view().sample_to_id(sample) {
+      Ok(id) => Some(id.0 as usize),
+      Err(_) => None,
+    }
+  }
+
+  pub fn id_to_name(&self, id: u32) -> Vec<u8> {
+    self.view().id_to_name(bcf::header::Id(id))
+  }
+
   pub fn info_type(&self, tag: &[u8]) -> Option<(TagType, TagLength)> {
     self.view().info_type(tag).ok()
   }

@@ -137,9 +137,18 @@ export class Variant {
     | Array<number | string | null | Array<number | string | null>>
     | undefined;
 
+  // FORMAT object for a single sample.
+  // Includes a `.sample_name` string property.
+  // Returns `undefined` if the sample name is not present.
+  // Only includes tags present in the record's FORMAT column.
+  sample(name: string):
+    | ({ sample_name: string } & Record<string, number | string | null | Array<number | string | null>>)
+    | undefined;
+
   // Format using the associated header
   toString(): string;
 }
+
 ```
 
 Notes:
