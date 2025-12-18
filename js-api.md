@@ -137,8 +137,7 @@ Notes:
 - Setters:
   - `variant.id = "..."` updates the record ID. Setting `""` results in the VCF missing value (`.`).
   - `variant.qual = 12.3` sets QUAL; `variant.qual = null` clears QUAL.
-  - `variant.filter = []` clears filters (equivalent to PASS when formatted).
-  - `variant.filter = ["PASS"]` is treated as clearing filters; `variant.filter` reads back as `[]`.
+  - `variant.filter = []` is treated as clearing filters; `variant.filter` reads back as `[]`.
   - Named filters must exist in the header (a `##FILTER=<ID=...>` definition) or setting them may throw.
 
 ### `class Header`

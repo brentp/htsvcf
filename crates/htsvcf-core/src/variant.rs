@@ -124,7 +124,7 @@ impl Variant {
   }
 
   pub fn set_filters(&mut self, filters: &[String]) -> Result<(), rust_htslib::errors::Error> {
-    let want_clear = filters.len() == 1 && (filters[0] == "PASS" || filters[0] == ".");
+    let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0] == "" || filters[0] == ".")) ;
 
     if want_clear {
       let refs: Vec<&[u8]> = Vec::new();

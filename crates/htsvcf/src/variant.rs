@@ -122,16 +122,13 @@ impl Variant {
 
     /// Return the FILTER column as a list of filter IDs.
     ///
-    /// Records that are `PASS` (or '.') return an empty list.
+    /// Records that are '' (or '.') return an empty list.
     pub fn filters(&self, scope: &v8::PinScope<'_, '_>) -> Vec<String> {
         let record = self.record.get(scope);
         let header = record.header();
         let mut out = Vec::new();
         for id in record.filters() {
             let name = String::from_utf8_lossy(&header.id_to_name(id)).into_owned();
-            if name == "PASS" {
-                continue;
-            }
             out.push(name);
         }
         out
@@ -143,7 +140,7 @@ impl Variant {
         filters: &[String],
     ) -> Result<(), rust_htslib::errors::Error> {
         let record = self.record.get_mut(scope);
-        let want_clear = filters.len() == 1 && (filters[0] == "PASS" || filters[0] == ".");
+        let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0] == "" || filters[0] == "."));
         if want_clear {
             let refs: Vec<&[u8]> = Vec::new();
             record.set_filters(&refs)?;
@@ -1048,7 +1045,7 @@ mod tests {
         assert_eq!(eval_js(&path, "variant.qual = 42; variant.qual"), "42");
         assert_eq!(eval_js(&path, "variant.qual = null; variant.qual === null"), "true");
 
-        assert_eq!(eval_js(&path, "variant.filter = ['PASS']; variant.filter.length"), "0");
+        assert_eq!(eval_js(&path, "variant.filter = ['PASS']; variant.filter.length"), "1");
     }
 
     #[test]
