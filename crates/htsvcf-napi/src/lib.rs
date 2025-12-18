@@ -1,3 +1,196 @@
+//! Node.js bindings for VCF/BCF file access via HTSlib.
+//!
+//! This crate provides Node-API (N-API) bindings for reading VCF/BCF files,
+//! enabling high-performance genomic data processing from JavaScript/TypeScript.
+//!
+//! # Installation
+//!
+//! ```bash
+//! npm install htsvcf
+//! ```
+//!
+//! # Quick Start
+//!
+//! ```js
+//! import { openReader } from 'htsvcf'
+//!
+//! const reader = await openReader('input.vcf.gz')
+//!
+//! // Iterate all variants
+//! while (true) {
+//!     const { done, value: variant } = await reader.next()
+//!     if (done) break
+//!
+//!     console.log(`${variant.chrom}:${variant.pos} ${variant.ref} -> ${variant.alt}`)
+//! }
+//!
+//! reader.close()
+//! ```
+//!
+//! # API Overview
+//!
+//! ## Opening files
+//!
+//! ```js
+//! // Async (recommended)
+//! const reader = await openReader('input.vcf.gz')
+//!
+//! // Sync constructor
+//! const reader = new Reader('input.vcf.gz')
+//! ```
+//!
+//! ## Iterating variants
+//!
+//! ```js
+//! // Async iteration (recommended)
+//! while (true) {
+//!     const { done, value } = await reader.next()
+//!     if (done) break
+//!     // process value (Variant)
+//! }
+//!
+//! // Sync iteration
+//! while (true) {
+//!     const { done, value } = reader.nextSync()
+//!     if (done) break
+//!     // process value
+//! }
+//! ```
+//!
+//! ## Querying regions (requires index)
+//!
+//! ```js
+//! if (reader.hasIndex()) {
+//!     // Query a region (0-based coordinates)
+//!     await reader.query('chr1', 1000, 2000)
+//!
+//!     // Or use region string (1-based, like samtools)
+//!     await reader.query('chr1:1001-2000')
+//!
+//!     // Then iterate as normal
+//!     while (true) {
+//!         const { done, value } = await reader.next()
+//!         if (done) break
+//!         // variants overlapping the region
+//!     }
+//! }
+//! ```
+//!
+//! ## Variant fields
+//!
+//! ```js
+//! const v = variant
+//!
+//! // Basic fields (read-only)
+//! v.chrom      // "chr1"
+//! v.pos        // 12345 (1-based)
+//! v.start      // 12344 (0-based)
+//! v.stop       // 12345 (end position)
+//! v.ref        // "A"
+//! v.alt        // ["G", "T"]
+//! v.rid        // Reference ID (integer) or undefined
+//!
+//! // Read/write fields
+//! v.id         // "rs12345" or "."
+//! v.id = "rs999"
+//!
+//! v.qual       // 30.5 or null if missing
+//! v.qual = 42.0
+//! v.qual = null  // Set to missing
+//!
+//! v.filter     // ["PASS"] or ["q10", "dp"]
+//! v.filter = ["PASS"]
+//! ```
+//!
+//! ## INFO fields
+//!
+//! ```js
+//! // Read INFO (returns typed values based on header)
+//! v.info('DP')         // 42 (Integer)
+//! v.info('AF')         // [0.25, 0.75] (Float array)
+//! v.info('SOMATIC')    // true (Flag)
+//! v.info('GENE')       // "BRCA1" (String)
+//! v.info('MISSING')    // undefined (not present)
+//!
+//! // Write INFO (type must match header definition)
+//! v.set_info('DP', 100)
+//! v.set_info('AF', [0.1, 0.9])
+//! v.set_info('SOMATIC', true)
+//! v.set_info('GENE', 'TP53')
+//! v.set_info('DP', null)  // Clear/remove the field
+//! ```
+//!
+//! ## FORMAT fields (per-sample)
+//!
+//! ```js
+//! // Get FORMAT values (array with one entry per sample)
+//! v.format('GT')  // ["0/1", "0/0", "1/1"]
+//! v.format('DP')  // [30, 25, null]  (null = missing)
+//! v.format('AD')  // [[10, 20], [25, 0], [0, 30]]
+//!
+//! // Get all FORMAT fields for one sample by name
+//! const s = v.sample('NA12878')
+//! s.GT          // "0/1"
+//! s.DP          // 30
+//! s.AD          // [10, 20]
+//! s.sample_name // "NA12878"
+//!
+//! // Get all samples at once (more efficient for bulk access)
+//! const all = v.samples()  // Array of sample objects
+//! all[0].GT     // First sample's genotype
+//! all[0].sample_name  // First sample's name
+//!
+//! // Get a subset of samples
+//! const subset = v.samples(['NA12878', 'NA12879'])
+//! ```
+//!
+//! ## Output
+//!
+//! ```js
+//! // Convert to VCF line (without trailing newline)
+//! v.toString()  // "chr1\t12345\trs12345\tA\tG\t30\tPASS\tDP=42\t..."
+//! ```
+//!
+//! ## Header access
+//!
+//! ```js
+//! const header = reader.header
+//!
+//! // List sample names
+//! header.samples()  // ["NA12878", "NA12879", ...]
+//!
+//! // Get field definitions
+//! header.get('INFO', 'DP')
+//! // { id: 'DP', type: 'Integer', number: '1', description: 'Read depth' }
+//!
+//! header.get('FORMAT', 'GT')
+//! // { id: 'GT', type: 'String', number: '1', description: 'Genotype' }
+//!
+//! // List all header records
+//! header.records()
+//! // [{ type: 'INFO', id: 'DP', number: '1', ... }, ...]
+//!
+//! // Add new field definitions
+//! header.addInfo('CUSTOM', '1', 'Integer', 'My custom annotation')
+//! header.addFormat('SCORE', '1', 'Float', 'Per-sample score')
+//!
+//! // Get full header text
+//! header.toString()
+//! ```
+//!
+//! # TypeScript
+//!
+//! Full TypeScript definitions are included. Key types:
+//!
+//! ```typescript
+//! import { Reader, Variant, Header, openReader } from 'htsvcf'
+//!
+//! const reader: Reader = await openReader('input.vcf.gz')
+//! const header: Header = reader.header
+//!
+//! const { value: variant }: { done: boolean; value: Variant } = await reader.next()
+//! ```
+
 use std::sync::{Arc, Mutex};
 
 use htsvcf_core as core;
