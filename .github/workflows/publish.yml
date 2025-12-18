@@ -19,6 +19,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: linux-arm64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: darwin-arm64
@@ -32,6 +35,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -40,6 +49,8 @@ jobs:
 
       - name: Build N-API addon (release)
         run: cargo build -p htsvcf-napi --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Copy addon
         shell: bash
@@ -47,16 +58,16 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            cp -f target/${{ matrix.target }}/release/libhtsvcf_napi.so artifacts/htsvcf.node
+            cp -f target/${{ matrix.target }}/release/libhtsvcf_napi.so artifacts/htsvcf.${{ matrix.artifact }}.node
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            cp -f target/${{ matrix.target }}/release/libhtsvcf_napi.dylib artifacts/htsvcf.node
+            cp -f target/${{ matrix.target }}/release/libhtsvcf_napi.dylib artifacts/htsvcf.${{ matrix.artifact }}.node
           fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.artifact }}
-          path: artifacts/htsvcf.node
+          path: artifacts/htsvcf.${{ matrix.artifact }}.node
           if-no-files-found: error
 
   publish:
@@ -79,10 +90,22 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Download Linux artifact
+      - name: Download Linux x64 artifact
         uses: actions/download-artifact@v4
         with:
           name: bindings-linux-x64
+          path: npm/htsvcf/
+
+      - name: Download Linux arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-linux-arm64
+          path: npm/htsvcf/
+
+      - name: Download macOS arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-darwin-arm64
           path: npm/htsvcf/
 
       - name: Extract version from tag
