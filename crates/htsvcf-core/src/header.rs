@@ -26,6 +26,14 @@ pub struct Header {
   id_to_name_cache: HashMap<u32, (String, Vec<u8>)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HeaderField {
+  pub id: String,
+  pub r#type: String,
+  pub number: String,
+  pub description: String,
+}
+
 unsafe impl Send for Header {}
 unsafe impl Sync for Header {}
 
@@ -216,5 +224,129 @@ impl Header {
     }
 
     Some(text)
+  }
+
+  pub fn get_field(&self, section: &str, id: &str) -> Option<HeaderField> {
+    let tag_info = match section {
+      "INFO" => self.info_type(id.as_bytes()),
+      "FORMAT" => self.format_type(id.as_bytes()),
+      _ => return None,
+    };
+
+    let (tag_type, tag_length) = tag_info?;
+
+    let mut description = String::new();
+    for record in self.header_records() {
+      match record {
+        HeaderRecord::Info { values, .. } if section == "INFO" => {
+          if values.iter().any(|(k, v)| k.as_str() == "ID" && v == id) {
+            description = values
+              .iter()
+              .find(|(k, _)| k.as_str() == "Description")
+              .map(|(_, v)| unquote(v))
+              .unwrap_or_default();
+            break;
+          }
+        }
+        HeaderRecord::Format { values, .. } if section == "FORMAT" => {
+          if values.iter().any(|(k, v)| k.as_str() == "ID" && v == id) {
+            description = values
+              .iter()
+              .find(|(k, _)| k.as_str() == "Description")
+              .map(|(_, v)| unquote(v))
+              .unwrap_or_default();
+            break;
+          }
+        }
+        _ => {}
+      }
+    }
+
+    Some(HeaderField {
+      id: id.to_string(),
+      r#type: tag_type_to_str(tag_type).to_string(),
+      number: tag_length_to_str(tag_length),
+      description,
+    })
+  }
+
+  pub fn all_fields(&self) -> Vec<(String, HeaderField)> {
+    let mut fields = Vec::new();
+    for record in self.header_records() {
+      match record {
+        HeaderRecord::Info { values, .. } => {
+          if let Some(field) = self.parse_record_to_field("INFO", values.into_iter().collect()) {
+            fields.push(("INFO".to_string(), field));
+          }
+        }
+        HeaderRecord::Format { values, .. } => {
+          if let Some(field) = self.parse_record_to_field("FORMAT", values.into_iter().collect()) {
+            fields.push(("FORMAT".to_string(), field));
+          }
+        }
+        HeaderRecord::Filter { values, .. } => {
+          if let Some(field) = self.parse_record_to_field("FILTER", values.into_iter().collect()) {
+            fields.push(("FILTER".to_string(), field));
+          }
+        }
+        _ => {}
+      }
+    }
+    fields
+  }
+
+  fn parse_record_to_field(
+    &self,
+    section: &str,
+    values: Vec<(String, String)>,
+  ) -> Option<HeaderField> {
+    let id = values.iter().find(|(k, _)| k.as_str() == "ID").map(|(_, v)| v.as_str())?;
+
+    let (tag_type, tag_length) = match section {
+      "INFO" => self.info_type(id.as_bytes())?,
+      "FORMAT" => self.format_type(id.as_bytes())?,
+      "FILTER" => (TagType::Flag, TagLength::Fixed(0)), // FILTER is implicitly a flag-like type
+      _ => return None,
+    };
+
+    let description = values
+      .iter()
+      .find(|(k, _)| k.as_str() == "Description")
+      .map(|(_, v)| unquote(v))
+      .unwrap_or_default();
+
+    Some(HeaderField {
+      id: id.to_string(),
+      r#type: tag_type_to_str(tag_type).to_string(),
+      number: tag_length_to_str(tag_length),
+      description,
+    })
+  }
+}
+
+fn unquote(s: &str) -> String {
+  if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+    s[1..s.len() - 1].to_string()
+  } else {
+    s.to_string()
+  }
+}
+
+fn tag_type_to_str(t: TagType) -> &'static str {
+  match t {
+    TagType::Flag => "Flag",
+    TagType::Integer => "Integer",
+    TagType::Float => "Float",
+    TagType::String => "String",
+  }
+}
+
+fn tag_length_to_str(l: TagLength) -> String {
+  match l {
+    TagLength::Fixed(n) => n.to_string(),
+    TagLength::AltAlleles => "A".to_string(),
+    TagLength::Alleles => "R".to_string(),
+    TagLength::Genotypes => "G".to_string(),
+    TagLength::Variable => ".".to_string(),
   }
 }

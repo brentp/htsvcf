@@ -1,5 +1,4 @@
-use rust_htslib::bcf;
-use rust_htslib::bcf::Read;
+use htsvcf_core::reader::{open_reader, Reader as CoreReader};
 
 use crate::header::{create_header_object, Header};
 use crate::variant::{create_object_template as create_variant_template, create_variant_object, Variant};
@@ -9,48 +8,8 @@ const READER_TYPE_NAME: &[u8] = b"Reader\0";
 
 const OWNER_PRIVATE_KEY: &str = "htsvcf::Reader#owner";
 
-#[derive(Debug)]
-enum InnerReader {
-    Unindexed(bcf::Reader),
-    Indexed(bcf::IndexedReader),
-}
-
-impl InnerReader {
-    fn header_ptr(&self) -> *mut rust_htslib::htslib::bcf_hdr_t {
-        match self {
-            InnerReader::Unindexed(r) => r.header().inner,
-            InnerReader::Indexed(r) => r.header().inner,
-        }
-    }
-
-    fn empty_record(&self) -> bcf::Record {
-        match self {
-            InnerReader::Unindexed(r) => r.empty_record(),
-            InnerReader::Indexed(r) => r.empty_record(),
-        }
-    }
-
-    fn read_record(&mut self, record: &mut bcf::Record) -> Option<Result<(), rust_htslib::errors::Error>> {
-        match self {
-            InnerReader::Unindexed(r) => r.read(record),
-            InnerReader::Indexed(r) => r.read(record),
-        }
-    }
-
-    fn fetch(&mut self, chrom: &str, start: u64, end: Option<u64>) -> Result<(), rust_htslib::errors::Error> {
-        let InnerReader::Indexed(r) = self else {
-            return Err(rust_htslib::errors::Error::Fetch);
-        };
-
-        // `fetch()` takes a numeric reference id.
-        let rid = r.header().name2rid(chrom.as_bytes())?;
-        r.fetch(rid, start, end)
-    }
-}
-
 struct ReaderWrapper {
-    inner: v8::cppgc::GcCell<InnerReader>,
-    has_index: bool,
+    inner: v8::cppgc::GcCell<CoreReader>,
     header_obj: v8::TracedReference<v8::Object>,
     variant_template: v8::TracedReference<v8::ObjectTemplate>,
 }
@@ -83,12 +42,6 @@ fn throw_error(scope: &mut v8::PinScope<'_, '_>, message: &str) {
     scope.throw_exception(exc);
 }
 
-fn has_index_on_disk(path: &str) -> bool {
-    // htslib supports CSI or TBI alongside the main file.
-    let candidates = [format!("{path}.csi"), format!("{path}.tbi")];
-    candidates.iter().any(|p| std::fs::metadata(p).is_ok())
-}
-
 fn reader_ctor(
     scope: &mut v8::PinScope<'_, '_>,
     args: v8::FunctionCallbackArguments,
@@ -110,29 +63,11 @@ fn reader_ctor(
     };
     let path = path_val.to_rust_string_lossy(scope);
 
-    let has_index = has_index_on_disk(&path);
-
-    let inner = if has_index {
-        match bcf::IndexedReader::from_path(&path) {
-            Ok(r) => InnerReader::Indexed(r),
-            Err(_) => match bcf::Reader::from_path(&path) {
-                Ok(r) => {
-                    // Index exists but couldn\'t be opened; still allow unindexed reads.
-                    InnerReader::Unindexed(r)
-                }
-                Err(e) => {
-                    throw_error(scope, &format!("failed to open {path}: {e}"));
-                    return;
-                }
-            },
-        }
-    } else {
-        match bcf::Reader::from_path(&path) {
-            Ok(r) => InnerReader::Unindexed(r),
-            Err(e) => {
-                throw_error(scope, &format!("failed to open {path}: {e}"));
-                return;
-            }
+    let inner = match open_reader(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            throw_error(scope, &format!("failed to open {path}: {e}"));
+            return;
         }
     };
 
@@ -147,7 +82,6 @@ fn reader_ctor(
 
     let wrapper = ReaderWrapper {
         inner: v8::cppgc::GcCell::new(inner),
-        has_index,
         header_obj: v8::TracedReference::new(scope, header_obj),
         variant_template: v8::TracedReference::new(scope, variant_template_local),
     };
@@ -195,7 +129,8 @@ fn reader_has_index_fn(
     };
 
     let reader = unsafe { wrapper.as_ref() };
-    rv.set(v8::Boolean::new(scope, reader.has_index).into());
+    let inner = reader.inner.get(scope);
+    rv.set(v8::Boolean::new(scope, inner.has_index()).into());
 }
 
 fn reader_iterator_fn(
@@ -232,14 +167,13 @@ fn reader_next_fn(
     };
 
     let inner = reader.inner.get_mut(scope);
-    let mut record = inner.empty_record();
-    match inner.read_record(&mut record) {
-        None => {
+    match inner.next_record() {
+        Ok(None) => {
             set_kv(scope, &result_obj, "done", v8::Boolean::new(scope, true).into());
             set_kv(scope, &result_obj, "value", v8::undefined(scope).into());
             rv.set(result_obj.into());
         }
-        Some(Ok(())) => {
+        Ok(Some(record)) => {
             let variant = Variant::from_record(record);
             let variant_obj = create_variant_object(scope, variant_template, variant, header_obj);
 
@@ -247,7 +181,7 @@ fn reader_next_fn(
             set_kv(scope, &result_obj, "value", variant_obj.into());
             rv.set(result_obj.into());
         }
-        Some(Err(e)) => {
+        Err(e) => {
             throw_error(scope, &format!("read failed: {e}"));
         }
     }
@@ -264,10 +198,12 @@ fn reader_query_fn(
         return;
     };
     let reader = unsafe { wrapper.as_ref() };
-
-    if !reader.has_index {
-        throw_type_error(scope, "query() requires an indexed file");
-        return;
+    {
+        let inner = reader.inner.get(scope);
+        if !inner.has_index() {
+            throw_type_error(scope, "query() requires an indexed file");
+            return;
+        }
     }
 
     if args.length() < 1 {
@@ -275,16 +211,14 @@ fn reader_query_fn(
         return;
     }
 
-    let (chrom, start, end) = if args.length() == 1 {
+    let result = if args.length() == 1 {
         let Ok(region_str) = v8::Local::<v8::String>::try_from(args.get(0)) else {
             throw_type_error(scope, "query(region) requires a string");
             return;
         };
-        let Some(tup) = parse_region_1based(&region_str.to_rust_string_lossy(scope)) else {
-            throw_type_error(scope, "invalid region");
-            return;
-        };
-        tup
+        let region = region_str.to_rust_string_lossy(scope);
+        let inner = reader.inner.get_mut(scope);
+        inner.query_region_1based(&region)
     } else {
         let Ok(chrom_str) = v8::Local::<v8::String>::try_from(args.get(0)) else {
             throw_type_error(scope, "query(chrom, start, end?) requires chrom string");
@@ -321,42 +255,14 @@ fn reader_query_fn(
             None
         };
 
-        (chrom, start as u64, end)
+        let inner = reader.inner.get_mut(scope);
+        inner.query(&chrom, start as u64, end)
     };
 
-    if chrom.is_empty() {
-        throw_type_error(scope, "invalid region");
-        return;
-    }
-
-    let inner = reader.inner.get_mut(scope);
-    match inner.fetch(&chrom, start, end) {
+    match result {
         Ok(()) => rv.set(v8::undefined(scope).into()),
         Err(e) => throw_error(scope, &format!("query failed: {e}")),
     }
-}
-
-fn parse_region_1based(region: &str) -> Option<(String, u64, Option<u64>)> {
-    // Accept: "chr", "chr:100", "chr:100-200". Coordinates are 1-based inclusive.
-    let (chrom, rest) = region.split_once(':').unwrap_or((region, ""));
-    if chrom.is_empty() {
-        return None;
-    }
-    if rest.is_empty() {
-        return Some((chrom.to_string(), 0, None));
-    }
-
-    let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, ""));
-    let start_1 = start_str.replace(',', "").parse::<u64>().ok()?;
-    let start_0 = start_1.saturating_sub(1);
-
-    if end_str.is_empty() {
-        return Some((chrom.to_string(), start_0, None));
-    }
-
-    let end_1 = end_str.replace(',', "").parse::<u64>().ok()?;
-    let end_0 = end_1.saturating_sub(1);
-    Some((chrom.to_string(), start_0, Some(end_0)))
 }
 
 fn set_kv(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Local<v8::Object>, key: &str, value: v8::Local<v8::Value>) {
@@ -444,7 +350,7 @@ mod tests {
     #[test]
     fn test_reader_iterates_all_records() {
         let path = fixture_vcf();
-        let mut rust_reader = bcf::Reader::from_path(&path).unwrap();
+        let mut rust_reader = rust_htslib::bcf::Reader::from_path(&path).unwrap();
         let expected = rust_reader.records().count();
 
         let js = format!(

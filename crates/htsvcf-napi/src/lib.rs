@@ -560,116 +560,30 @@ impl Header {
 
   #[napi]
   pub fn get(&self, env: Env, section: String, id: String) -> napi::Result<sys::napi_value> {
-    use rust_htslib::bcf::header::{HeaderRecord, TagLength, TagType};
-
-    let tag_info = match section.as_str() {
-      "INFO" => self.inner.info_type(id.as_bytes()),
-      "FORMAT" => self.inner.format_type(id.as_bytes()),
-      _ => None,
-    };
-
-    let Some((tag_type, tag_length)) = tag_info else {
+    let Some(field) = self.inner.get_field(&section, &id) else {
       return unsafe { ToNapiValue::to_napi_value(env.raw(), ()) };
     };
 
-    let mut description: Option<String> = None;
-    let want_section = section.as_str();
-
-    for record in self.inner.header_records() {
-      match record {
-        HeaderRecord::Info { values, .. } if want_section == "INFO" => {
-          let mut record_id: Option<String> = None;
-          let mut record_description: Option<String> = None;
-
-          for (k, v) in values.into_iter() {
-            if k == "ID" {
-              record_id = Some(v);
-            } else if k == "Description" {
-              record_description = Some(unquote_string(v));
-            }
-          }
-
-          if record_id.as_deref() == Some(id.as_str()) {
-            description = record_description;
-            break;
-          }
-        }
-        HeaderRecord::Format { values, .. } if want_section == "FORMAT" => {
-          let mut record_id: Option<String> = None;
-          let mut record_description: Option<String> = None;
-
-          for (k, v) in values.into_iter() {
-            if k == "ID" {
-              record_id = Some(v);
-            } else if k == "Description" {
-              record_description = Some(unquote_string(v));
-            }
-          }
-
-          if record_id.as_deref() == Some(id.as_str()) {
-            description = record_description;
-            break;
-          }
-        }
-        _ => {}
-      }
-    }
-
-    let type_str = match tag_type {
-      TagType::Flag => "Flag",
-      TagType::Integer => "Integer",
-      TagType::Float => "Float",
-      TagType::String => "String",
-    }
-    .to_string();
-
-    let number = match tag_length {
-      TagLength::Fixed(n) => n.to_string(),
-      TagLength::AltAlleles => "A".to_string(),
-      TagLength::Alleles => "R".to_string(),
-      TagLength::Genotypes => "G".to_string(),
-      TagLength::Variable => ".".to_string(),
-    };
-
     let mut out = Object::new(&env)?;
-    out.set_named_property("id", id)?;
-    out.set_named_property("type", type_str)?;
-    out.set_named_property("number", number)?;
-    out.set_named_property("description", description.unwrap_or_default())?;
+    out.set_named_property("id", field.id)?;
+    out.set_named_property("type", field.r#type)?;
+    out.set_named_property("number", field.number)?;
+    out.set_named_property("description", field.description)?;
 
     Ok(out.raw())
   }
 
   #[napi]
   pub fn records(&self, env: Env) -> napi::Result<Vec<Object<'static>>> {
-    use rust_htslib::bcf::header::HeaderRecord;
-
     let mut out = Vec::new();
-    for record in self.inner.header_records() {
-      match record {
-        HeaderRecord::Info { key, values } => {
-          out.push(record_kv(env, "INFO", key, values)?);
-        }
-        HeaderRecord::Format { key, values } => {
-          out.push(record_kv(env, "FORMAT", key, values)?);
-        }
-        HeaderRecord::Filter { key, values } => {
-          out.push(record_kv(env, "FILTER", key, values)?);
-        }
-        HeaderRecord::Contig { key, values } => {
-          out.push(record_kv(env, "contig", key, values)?);
-        }
-        HeaderRecord::Structured { key, values } => {
-          out.push(record_kv(env, "structured", key, values)?);
-        }
-         HeaderRecord::Generic { key, value } => {
-          let mut o: Object<'static> = Object::new(&env)?;
-          o.set_named_property("type", "generic")?;
-          o.set_named_property("key", key)?;
-          o.set_named_property("value", value)?;
-          out.push(o);
-        }
-      }
+    for (section, field) in self.inner.all_fields() {
+      let mut o: Object<'static> = Object::new(&env)?;
+      o.set_named_property("type", section)?;
+      o.set_named_property("id", field.id)?;
+      o.set_named_property("number", field.number)?;
+      o.set_named_property("type", field.r#type)?;
+      o.set_named_property("description", field.description)?;
+      out.push(o);
     }
 
     Ok(out)
@@ -688,30 +602,6 @@ pub struct HeaderGetResult {
   pub r#type: String,
   pub number: String,
   pub description: String,
-}
-
-fn unquote_string(s: String) -> String {
-  let bytes = s.as_bytes();
-  if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
-    s[1..bytes.len() - 1].to_string()
-  } else {
-    s
-  }
-}
-
-fn record_kv(
-  env: Env,
-  record_type: &str,
-  key: String,
-  values: impl IntoIterator<Item = (String, String)>,
-) -> napi::Result<Object<'static>> {
-  let mut o: Object<'static> = Object::new(&env)?;
-  o.set_named_property("type", record_type)?;
-  o.set_named_property("key", key)?;
-  for (k, v) in values.into_iter() {
-    o.set_named_property(k.as_str(), v)?;
-  }
-  Ok(o)
 }
 
 fn infovalue_to_napi_value(env: &Env, v: &core::InfoValue) -> napi::Result<sys::napi_value> {

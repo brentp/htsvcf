@@ -168,42 +168,15 @@ fn records_fn(
         .expect("Failed to unwrap Header");
     let header = unsafe { wrapper.as_ref() };
 
-    let records = header.header_records();
-    let arr = v8::Array::new(scope, records.len() as i32);
-    for (i, record) in records.into_iter().enumerate() {
+    let fields = header.inner.all_fields();
+    let arr = v8::Array::new(scope, fields.len() as i32);
+    for (i, (section, field)) in fields.into_iter().enumerate() {
         let o = v8::Object::new(scope);
-        match record {
-            HeaderRecord::Info { key, values } => {
-                set_str(scope, &o, "type", "INFO");
-                set_str(scope, &o, "key", &key);
-                set_kv(scope, &o, values);
-            }
-            HeaderRecord::Format { key, values } => {
-                set_str(scope, &o, "type", "FORMAT");
-                set_str(scope, &o, "key", &key);
-                set_kv(scope, &o, values);
-            }
-            HeaderRecord::Filter { key, values } => {
-                set_str(scope, &o, "type", "FILTER");
-                set_str(scope, &o, "key", &key);
-                set_kv(scope, &o, values);
-            }
-            HeaderRecord::Contig { key, values } => {
-                set_str(scope, &o, "type", "contig");
-                set_str(scope, &o, "key", &key);
-                set_kv(scope, &o, values);
-            }
-            HeaderRecord::Structured { key, values } => {
-                set_str(scope, &o, "type", "structured");
-                set_str(scope, &o, "key", &key);
-                set_kv(scope, &o, values);
-            }
-            HeaderRecord::Generic { key, value } => {
-                set_str(scope, &o, "type", "generic");
-                set_str(scope, &o, "key", &key);
-                set_str(scope, &o, "value", &value);
-            }
-        }
+        set_str(scope, &o, "type", &section);
+        set_str(scope, &o, "ID", &field.id);
+        set_str(scope, &o, "Number", &field.number);
+        set_str(scope, &o, "Type", &field.r#type);
+        set_str(scope, &o, "Description", &field.description);
 
         arr.set_index(scope, i as u32, o.into());
     }
@@ -239,36 +212,16 @@ fn get_fn(
     let section = section_str.to_rust_string_lossy(scope);
     let id = id_str.to_rust_string_lossy(scope);
 
-    let tag_info = match section.as_str() {
-        "INFO" => header.info_type(id.as_bytes()),
-        "FORMAT" => header.format_type(id.as_bytes()),
-        _ => None,
-    };
-
-    let Some((tag_type, tag_length)) = tag_info else {
+    let Some(field) = header.inner.get_field(&section, &id) else {
         rv.set(v8::undefined(scope).into());
         return;
     };
 
     let o = v8::Object::new(scope);
-    set_str(scope, &o, "id", &id);
-
-    let type_str = match tag_type {
-        TagType::Flag => "Flag",
-        TagType::Integer => "Integer",
-        TagType::Float => "Float",
-        TagType::String => "String",
-    };
-    set_str(scope, &o, "type", type_str);
-
-    let number_str = match tag_length {
-        TagLength::Fixed(n) => n.to_string(),
-        TagLength::AltAlleles => "A".to_string(),
-        TagLength::Alleles => "R".to_string(),
-        TagLength::Genotypes => "G".to_string(),
-        TagLength::Variable => ".".to_string(),
-    };
-    set_str(scope, &o, "number", &number_str);
+    set_str(scope, &o, "id", &field.id);
+    set_str(scope, &o, "type", &field.r#type);
+    set_str(scope, &o, "number", &field.number);
+    set_str(scope, &o, "description", &field.description);
 
     rv.set(o.into());
 }
@@ -386,17 +339,6 @@ fn set_str(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Local<v8::Object>, key: &
     let k = v8::String::new(scope, key).unwrap();
     let v = v8::String::new(scope, value).unwrap();
     obj.set(scope, k.into(), v.into());
-}
-
-/// Set multiple string key/value properties.
-fn set_kv(
-    scope: &mut v8::PinScope<'_, '_>,
-    obj: &v8::Local<v8::Object>,
-    values: impl IntoIterator<Item = (String, String)>,
-) {
-    for (k, v) in values {
-        set_str(scope, obj, &k, &v);
-    }
 }
 
 #[cfg(test)]
