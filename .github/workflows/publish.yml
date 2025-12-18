@@ -66,6 +66,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # Required for OIDC trusted publishing
+    environment: npm
 
     steps:
       - name: Checkout
@@ -94,5 +96,3 @@ jobs:
 
       - name: Publish to npm
         run: npm -C npm/htsvcf publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

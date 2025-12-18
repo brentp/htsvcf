@@ -4,12 +4,23 @@ This document describes how to publish a new version of the `htsvcf` npm package
 
 ## Prerequisites
 
-1. **NPM_TOKEN secret**: Ensure the `NPM_TOKEN` secret is configured in GitHub repository settings:
-   - Go to repository Settings > Secrets and variables > Actions
-   - Add a secret named `NPM_TOKEN` with a valid npm access token
-   - The token must have publish permissions for the `htsvcf` package
+### OIDC Trusted Publishing Setup (one-time)
 
-2. **npm account**: The token owner must have publish access to the `htsvcf` package on npmjs.com
+This repository uses [npm OIDC trusted publishing](https://docs.npmjs.com/trusted-publishers) for secure, tokenless authentication. This eliminates the need to manage npm tokens.
+
+1. **Link the package to this GitHub repository on npmjs.com**:
+   - Go to https://www.npmjs.com/package/htsvcf/access (or create the package first)
+   - Under "Publishing access", click "Add trusted publisher"
+   - Configure:
+     - Repository owner: `brentp`
+     - Repository name: `htsvcf`
+     - Workflow filename: `publish.yml`
+     - Environment: `npm`
+
+2. **Create a GitHub environment**:
+   - Go to repository Settings > Environments
+   - Create an environment named `npm`
+   - Optionally add protection rules (e.g., required reviewers)
 
 ## Release Process
 
@@ -49,7 +60,7 @@ The GitHub Action will automatically:
 
 1. Build the N-API addon for Linux (x86_64) and macOS (ARM64)
 2. Update the package.json version from the tag
-3. Publish the package to npm with provenance
+3. Publish the package to npm with provenance (using OIDC)
 
 Monitor progress at: `https://github.com/<owner>/<repo>/actions/workflows/publish.yml`
 
@@ -69,8 +80,9 @@ The npm package includes:
 - Verify the N-API addon builds: `cargo build -p htsvcf-napi --release`
 
 ### Publish failures
-- Verify the `NPM_TOKEN` secret is set and valid
-- Check npm account has publish permissions
+- Verify OIDC trusted publishing is configured on npmjs.com
+- Ensure the `npm` environment exists in GitHub repository settings
+- Check that the workflow has `id-token: write` permission
 - Ensure the version doesn't already exist on npm
 
 ### Version mismatch
