@@ -308,3 +308,60 @@ test("nextSync throws after close", () => {
 
   assert.throws(() => reader.nextSync(), /reader is closed/);
 });
+
+test("Header.samples returns array of sample names", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-header-samples-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t0/0\t1/1",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+
+  const samples = reader.header.samples();
+  assert.ok(Array.isArray(samples));
+  assert.equal(samples.length, 3);
+  assert.equal(samples[0], "S1");
+  assert.equal(samples[1], "S2");
+  assert.equal(samples[2], "S3");
+  assert.deepEqual(samples, ["S1", "S2", "S3"]);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Header.samples returns empty array for VCF without samples", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-header-no-samples-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    "chr1\t1\t.\tA\tC\t.\t.\t.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+
+  const samples = reader.header.samples();
+  assert.ok(Array.isArray(samples));
+  assert.equal(samples.length, 0);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});

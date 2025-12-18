@@ -674,6 +674,11 @@ impl Header {
 
     Ok(out)
   }
+
+  #[napi]
+  pub fn samples(&self) -> Vec<String> {
+    self.inner.sample_names().to_vec()
+  }
 }
 
 #[napi(object)]

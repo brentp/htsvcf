@@ -98,6 +98,7 @@ if (r.hasIndex()) {
         ```
 
   - `header.get(section, id) -> {id, type, number} | undefined` where `section` is `"INFO"` or `"FORMAT"`
+  - `header.samples() -> Array<string>` returns the list of sample names from the header
   - `header.addInfo(id, number, type, description)`
   - `header.addFormat(id, number, type, description)`
 - `variant`: fields/methods

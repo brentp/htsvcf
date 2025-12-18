@@ -140,6 +140,10 @@ pub fn create_header_object<'a>(
     let to_string_template = v8::FunctionTemplate::new(scope, to_string_fn);
     object_template.set(to_string_key.into(), to_string_template.into());
 
+    let samples_key = v8::String::new(scope, "samples").unwrap();
+    let samples_template = v8::FunctionTemplate::new(scope, samples_fn);
+    object_template.set(samples_key.into(), samples_template.into());
+
     let object = object_template
         .new_instance(scope)
         .expect("failed to create Header instance");
@@ -311,6 +315,27 @@ fn to_string_fn(
             rv.set(v8::undefined(scope).into());
         }
     }
+}
+
+/// V8 callback for `header.samples()`.
+fn samples_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<HEADER_TAG, Header>(scope, this) }
+        .expect("Failed to unwrap Header");
+    let header = unsafe { wrapper.as_ref() };
+
+    let samples = header.sample_names();
+    let arr = v8::Array::new(scope, samples.len() as i32);
+    for (i, name) in samples.iter().enumerate() {
+        let v = v8::String::new(scope, name).unwrap();
+        arr.set_index(scope, i as u32, v.into());
+    }
+
+    rv.set(arr.into());
 }
 
 /// Shared implementation for header field mutations from JS.
@@ -549,6 +574,46 @@ chr1\t1\t.\tA\tC\t.\t.\tDP=7\n";
             ),
             "true"
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `header.samples()` should return an array of sample names.
+    fn test_header_samples() {
+        let path = tmp_path("header_samples.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t1\t.\tA\tC\t.\t.\tDP=7\tGT\t0/1\t0/0\t1/1\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        assert_eq!(eval_header_js(path, "header.samples().length"), "3");
+        assert_eq!(eval_header_js(path, "header.samples()[0]"), "S1");
+        assert_eq!(eval_header_js(path, "header.samples()[1]"), "S2");
+        assert_eq!(eval_header_js(path, "header.samples()[2]"), "S3");
+        assert_eq!(eval_header_js(path, "header.samples().join(',')"), "S1,S2,S3");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `header.samples()` should return empty array for VCF without samples.
+    fn test_header_samples_empty() {
+        let path = tmp_path("header_samples_empty.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t1\t.\tA\tC\t.\t.\tDP=7\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        assert_eq!(eval_header_js(path, "header.samples().length"), "0");
+        assert_eq!(eval_header_js(path, "Array.isArray(header.samples())"), "true");
 
         let _ = fs::remove_file(path);
     }

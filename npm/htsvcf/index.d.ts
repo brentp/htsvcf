@@ -5,6 +5,7 @@ export class Header {
   get(section: "INFO" | "FORMAT", id: string): HeaderGetResult | undefined;
   addInfo(id: string, number: string, type: "Flag" | "Integer" | "Float" | "String", description: string): void;
   addFormat(id: string, number: string, type: "Flag" | "Integer" | "Float" | "String", description: string): void;
+  samples(): string[];
   toString(): string;
 }
 
