@@ -7,7 +7,9 @@ This repo exposes the same high-level API through **two bindings**:
 
 ## Feature addition checklist (required)
 
-When adding or changing any public API (Reader/Header/Variant/etc.), do **all** of the following:
+When adding or changing any public API (Reader/Header/Variant/etc.), 
+Attempt to **minimize code duplication** by sharing methods written in the core.
+do **all** of the following:
 
 1. **Implement in the v8 binding**
    - Update the v8-side implementation in `crates/htsvcf/src/*`.
