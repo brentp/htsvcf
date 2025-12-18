@@ -180,6 +180,11 @@ if (reader.hasIndex()) {
   }
 }
 
+console.log("SAMPLES")
+console.log(it3.value.samples())
+console.log("samples(['S1']")
+console.log(it3.value.samples(['S1']))
+
 reader.close();
 filterReader.close();
 setInfoReader.close();

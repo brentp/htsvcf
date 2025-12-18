@@ -1,94 +1,102 @@
-use rust_htslib::bcf;
 use rust_htslib::bcf::header::{HeaderRecord, TagLength, TagType};
-use std::cell::Cell;
-use std::ffi::CString;
-use std::mem::ManuallyDrop;
+use std::collections::HashMap;
 
 pub const HEADER_TAG: u16 = 2;
 const HEADER_TYPE_NAME: &[u8] = b"Header\0";
 
-/// Thin wrapper around an HTSlib `bcf_hdr_t` for use in V8.
+/// Thin wrapper around `htsvcf_core::Header` for use in V8.
 ///
-/// This owns *no* memory; it references the underlying header owned by the
-/// `rust-htslib` reader. It provides read access and a small mutation API for
-/// adding INFO/FORMAT lines.
+/// This delegates all VCF header logic to the core Header and adds only
+/// V8-specific functionality (GC integration, JS bindings).
 #[derive(Debug)]
 pub struct Header {
-    inner: *mut rust_htslib::htslib::bcf_hdr_t,
-    dirty: Cell<bool>,
-}
-
-impl Header {
-    /// Get the raw header pointer.
-    pub(crate) fn inner_ptr(&self) -> *mut rust_htslib::htslib::bcf_hdr_t {
-        self.inner
-    }
+    inner: htsvcf_core::Header,
 }
 
 impl Header {
     /// Create a `Header` from a raw `bcf_hdr_t` pointer.
-    pub fn new(inner: *mut rust_htslib::htslib::bcf_hdr_t) -> Self {
+    ///
+    /// # Safety
+    /// The pointer must be valid. The core Header will duplicate and own the memory.
+    pub unsafe fn new(ptr: *mut rust_htslib::htslib::bcf_hdr_t) -> Self {
         Self {
-            inner,
-            dirty: Cell::new(false),
+            inner: htsvcf_core::Header::new(ptr),
         }
     }
 
-    /// Create a temporary `HeaderView` without taking ownership.
-    fn view(&self) -> ManuallyDrop<bcf::header::HeaderView> {
-        // We intentionally suppress Drop here because HeaderView would call
-        // `bcf_hdr_destroy()` on the raw pointer it wraps.
-        ManuallyDrop::new(bcf::header::HeaderView::new(self.inner))
+    /// Get the raw header pointer.
+    pub(crate) fn inner_ptr(&self) -> *mut rust_htslib::htslib::bcf_hdr_t {
+        self.inner.inner_ptr()
     }
 
     /// Return parsed header records.
     pub fn header_records(&self) -> Vec<HeaderRecord> {
-        self.view().header_records()
+        self.inner.header_records()
     }
 
     /// Get INFO tag type/length from the header.
     pub fn info_type(&self, tag: &[u8]) -> Option<(TagType, TagLength)> {
-        self.view().info_type(tag).ok()
+        self.inner.info_type(tag)
     }
 
     /// Get FORMAT tag type/length from the header.
     pub fn format_type(&self, tag: &[u8]) -> Option<(TagType, TagLength)> {
-        self.view().format_type(tag).ok()
+        self.inner.format_type(tag)
     }
 
-    /// Sync header indexes after mutations.
-    fn sync(&self) {
-        if !self.dirty.replace(false) {
-            return;
-        }
-        unsafe {
-            rust_htslib::htslib::bcf_hdr_sync(self.inner);
-        }
+    /// Get sample ID (index) from sample name.
+    pub fn sample_id(&self, sample: &[u8]) -> Option<usize> {
+        self.inner.sample_id(sample)
+    }
+
+    /// Get tag name from numeric ID.
+    pub fn id_to_name(&self, id: u32) -> Vec<u8> {
+        self.inner.id_to_name(id)
+    }
+
+    /// Get the cached name for a tag ID, returning both the String and bytes.
+    pub fn id_to_name_cached(&self, id: u32) -> (String, Vec<u8>) {
+        self.inner.id_to_name_cached(id)
+    }
+
+    /// Get the number of samples in the header.
+    pub fn sample_count(&self) -> usize {
+        self.inner.sample_count()
+    }
+
+    /// Get all sample names as strings.
+    pub fn sample_names(&self) -> &[String] {
+        self.inner.sample_names()
+    }
+
+    /// Get the index of a sample by name, or None if not found.
+    pub fn sample_idx(&self, name: &str) -> Option<usize> {
+        self.inner.sample_idx(name)
+    }
+
+    /// Get a reference to the sample name-to-index map.
+    pub fn sample_name_to_idx(&self) -> &HashMap<String, usize> {
+        self.inner.sample_name_to_idx()
     }
 
     /// Append a raw header line (e.g. `##INFO=...`).
     pub fn push_record(&self, record: &[u8]) -> bool {
-        let Ok(c_str) = CString::new(record) else {
-            return false;
-        };
-        let r = unsafe { rust_htslib::htslib::bcf_hdr_append(self.inner, c_str.as_ptr()) };
-        self.dirty.set(true);
-        self.sync();
-        r == 0
+        self.inner.push_record(record)
     }
 
     /// Add an `##INFO` header line.
     pub fn add_info(&self, id: &str, number: &str, ty: &str, description: &str) -> bool {
-        let record =
-            format!("##INFO=<ID={id},Number={number},Type={ty},Description=\"{description}\">");
-        self.push_record(record.as_bytes())
+        self.inner.add_info(id, number, ty, description)
     }
 
     /// Add a `##FORMAT` header line.
     pub fn add_format(&self, id: &str, number: &str, ty: &str, description: &str) -> bool {
-        let record =
-            format!("##FORMAT=<ID={id},Number={number},Type={ty},Description=\"{description}\">");
-        self.push_record(record.as_bytes())
+        self.inner.add_format(id, number, ty, description)
+    }
+
+    /// Format header as string.
+    pub fn to_string(&self) -> Option<String> {
+        self.inner.to_string()
     }
 }
 
@@ -294,33 +302,15 @@ fn to_string_fn(
         .expect("Failed to unwrap Header");
     let header = unsafe { wrapper.as_ref() };
 
-    // Ensure any header modifications are reflected.
-    header.sync();
-
-    let mut s = rust_htslib::htslib::kstring_t {
-        l: 0,
-        m: 0,
-        s: std::ptr::null_mut(),
-    };
-
-    let ret = unsafe { rust_htslib::htslib::bcf_hdr_format(header.inner_ptr(), 0, &mut s) };
-    if ret != 0 {
-        if !s.s.is_null() {
-            unsafe { rust_htslib::htslib::free(s.s as *mut std::os::raw::c_void) };
+    match header.to_string() {
+        Some(text) => {
+            let out = v8::String::new(scope, &text).unwrap();
+            rv.set(out.into());
         }
-        rv.set(v8::undefined(scope).into());
-        return;
+        None => {
+            rv.set(v8::undefined(scope).into());
+        }
     }
-
-    let bytes = unsafe { std::slice::from_raw_parts(s.s as *const u8, s.l as usize) };
-    let text = String::from_utf8_lossy(bytes).into_owned();
-
-    if !s.s.is_null() {
-        unsafe { rust_htslib::htslib::free(s.s as *mut std::os::raw::c_void) };
-    }
-
-    let out = v8::String::new(scope, &text).unwrap();
-    rv.set(out.into());
 }
 
 /// Shared implementation for header field mutations from JS.
@@ -418,8 +408,8 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let reader = bcf::Reader::from_path(path).unwrap();
-        let header_obj = create_header_object(scope, Header::new(reader.header().inner));
+        let reader = rust_htslib::bcf::Reader::from_path(path).unwrap();
+        let header_obj = create_header_object(scope, unsafe { Header::new(reader.header().inner) });
 
         let code = v8::String::new(scope, js_expr).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();

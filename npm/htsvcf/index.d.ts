@@ -43,6 +43,7 @@ export class Variant {
   set_info(tag: string, value: boolean | number | string | Array<boolean | number | string> | null | undefined): void;
   format(tag: string): Array<boolean | number | string | Array<number | string> | null> | undefined;
   sample(name: string): ({ sample_name: string } & Record<string, number | string | null | Array<number | string | null>>) | undefined;
+  samples(subset?: string[]): Array<{ sample_name: string } & Record<string, number | string | null | Array<number | string | null>>>;
   toString(): string;
 }
 

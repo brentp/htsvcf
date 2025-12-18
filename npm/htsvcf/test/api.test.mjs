@@ -156,6 +156,82 @@ test("Variant.format returns per-sample typed values", async () => {
 
   assert.equal(variant.sample("NOPE"), undefined);
 
+  // Test samples() - returns array of all sample data
+  const allSamples = variant.samples();
+  assert.ok(Array.isArray(allSamples));
+  assert.equal(allSamples.length, 2);
+
+  // First sample matches sample("S1")
+  assert.equal(allSamples[0].sample_name, "S1");
+  assert.equal(allSamples[0].DP, 7);
+  assert.deepEqual(allSamples[0].AD, [1, 2]);
+  assert.ok(Math.abs(allSamples[0].AF[0] - 0.1) < 1e-6);
+  assert.ok(Math.abs(allSamples[0].AF[1] - 0.2) < 1e-6);
+  assert.equal(allSamples[0].NOTE, "hi");
+
+  // Second sample matches sample("S2")
+  assert.equal(allSamples[1].sample_name, "S2");
+  assert.equal(allSamples[1].DP, null);
+  assert.deepEqual(allSamples[1].AD, [null, null]);
+  assert.deepEqual(allSamples[1].AF, [null, null]);
+  assert.equal(allSamples[1].NOTE, null);
+
+  // Test samples(subset) - returns only specified samples in given order
+  const subset1 = variant.samples(["S2"]);
+  assert.ok(Array.isArray(subset1));
+  assert.equal(subset1.length, 1);
+  assert.equal(subset1[0].sample_name, "S2");
+  assert.equal(subset1[0].DP, null);
+
+  // Test samples(subset) with reversed order
+  const subset2 = variant.samples(["S2", "S1"]);
+  assert.equal(subset2.length, 2);
+  assert.equal(subset2[0].sample_name, "S2");
+  assert.equal(subset2[1].sample_name, "S1");
+  assert.equal(subset2[1].DP, 7);
+
+  // Test samples(subset) with unknown sample names (silently skipped)
+  const subset3 = variant.samples(["NOPE", "S1", "ALSO_NOPE"]);
+  assert.equal(subset3.length, 1);
+  assert.equal(subset3[0].sample_name, "S1");
+
+  // Test samples(subset) with all unknown names returns empty array
+  const subset4 = variant.samples(["NOPE", "ALSO_NOPE"]);
+  assert.equal(subset4.length, 0);
+
+  // Test samples(undefined) returns all samples (same as no argument)
+  const subset5 = variant.samples(undefined);
+  assert.equal(subset5.length, 2);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.samples returns empty array for VCF with no samples", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-no-samples-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    "chr1\t1\t.\tA\tC\t.\t.\t.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  const allSamples = variant.samples();
+  assert.ok(Array.isArray(allSamples));
+  assert.equal(allSamples.length, 0);
+
   reader.close();
   await fs.rm(tmp, { recursive: true, force: true });
 });

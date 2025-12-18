@@ -297,42 +297,146 @@ impl Variant {
       return None;
     }
 
-    let record_ptr = self.record.inner() as *const rust_htslib::htslib::bcf1_t
-      as *mut rust_htslib::htslib::bcf1_t;
+    let format_tags = self.get_format_tag_names(header);
+    let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(format_tags.len() + 1);
 
-    // Ensure FORMAT is unpacked so `d.fmt` is populated.
-    let _ = unsafe { rust_htslib::htslib::bcf_unpack(record_ptr, rust_htslib::htslib::BCF_UN_FMT as i32) };
-
-    let n_fmt = unsafe { (*record_ptr).n_fmt() as usize };
-    let fmt_ptr = unsafe { (*record_ptr).d.fmt };
-
-    let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(n_fmt.saturating_add(1));
-
-    if !fmt_ptr.is_null() && n_fmt != 0 {
-      for i in 0..n_fmt {
-        let fmt = unsafe { *fmt_ptr.add(i) };
-        let tag_name_bytes = header.id_to_name(fmt.id as u32);
-        let tag_name = match std::str::from_utf8(&tag_name_bytes) {
-          Ok(s) => s,
-          Err(_) => continue,
-        };
-
-        let Some(value) = format_value_for_sample(header, &self.record, &tag_name_bytes, sample_id) else {
-          continue;
-        };
-
-        out.push((tag_name.to_string(), value));
-      }
+    for (tag_name, tag_bytes) in format_tags {
+      let Some(value) = format_value_for_sample(header, &self.record, &tag_bytes, sample_id) else {
+        continue;
+      };
+      out.push((tag_name, value));
     }
 
     // Include the sample name so JS bindings can expose it.
-    // Set it last so it can't be overwritten by a FORMAT tag.
+    // Set it last so it can't be overwritten by a FORMAT tag named "sample_name".
     out.push((
       "sample_name".to_string(),
       FormatValue::String(sample.to_string()),
     ));
 
     Some(out)
+  }
+
+  /// Returns samples' FORMAT data as an array of objects.
+  ///
+  /// If `subset` is `None`, returns all samples in header order.
+  /// If `subset` is `Some(names)`, returns only the specified samples in the
+  /// order given. Unknown sample names are silently skipped.
+  ///
+  /// Each element contains all FORMAT fields plus a `sample_name` key.
+  /// Returns an empty Vec if the VCF has no samples or no requested samples exist.
+  pub fn samples(
+    &self,
+    header: &Header,
+    subset: Option<&[&str]>,
+  ) -> Vec<Vec<(String, FormatValue)>> {
+    let sample_count = self.record.sample_count() as usize;
+    if sample_count == 0 {
+      return Vec::new();
+    }
+
+    let sample_names = header.sample_names();
+    let format_tags = self.get_format_tag_names(header);
+
+    // Determine which sample indices to include and in what order
+    let sample_indices: Vec<usize> = match subset {
+      None => (0..sample_count).collect(),
+      Some(names) => {
+        let name_to_idx = header.sample_name_to_idx();
+        names
+          .iter()
+          .filter_map(|name| name_to_idx.get(*name).copied())
+          .collect()
+      }
+    };
+
+    if sample_indices.is_empty() {
+      return Vec::new();
+    }
+
+    // Pre-allocate result vectors for each requested sample
+    let mut results: Vec<Vec<(String, FormatValue)>> = sample_indices
+      .iter()
+      .map(|_| Vec::with_capacity(format_tags.len() + 1))
+      .collect();
+
+    // For each FORMAT tag, fetch values for ALL samples at once and distribute to requested ones
+    for (tag_name, tag_bytes) in &format_tags {
+      let Some((tag_type, tag_length)) = header.format_type(tag_bytes) else {
+        continue;
+      };
+
+      match tag_type {
+        bcf::header::TagType::Integer => {
+          let Ok(all_values) = self.record.format(tag_bytes).integer() else {
+            continue;
+          };
+          for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+            if let Some(per_sample) = all_values.get(sample_idx) {
+              let value = format_numeric_to_value(per_sample, tag_length, FormatValue::Int);
+              results[result_idx].push((tag_name.clone(), value));
+            }
+          }
+        }
+        bcf::header::TagType::Float => {
+          let Ok(all_values) = self.record.format(tag_bytes).float() else {
+            continue;
+          };
+          for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+            if let Some(per_sample) = all_values.get(sample_idx) {
+              let value = format_numeric_to_value(per_sample, tag_length, FormatValue::Float);
+              results[result_idx].push((tag_name.clone(), value));
+            }
+          }
+        }
+        bcf::header::TagType::String => {
+          let Ok(all_values) = self.record.format(tag_bytes).string() else {
+            continue;
+          };
+          for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+            if let Some(per_sample) = all_values.get(sample_idx) {
+              let value = format_string_to_value(*per_sample, tag_length);
+              results[result_idx].push((tag_name.clone(), value));
+            }
+          }
+        }
+        bcf::header::TagType::Flag => {
+          // Flags are not valid for FORMAT
+        }
+      }
+    }
+
+    // Add sample_name to each result (last, so it can't be overwritten by a FORMAT tag)
+    for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+      let name = sample_names
+        .get(sample_idx)
+        .map(|s| s.clone())
+        .unwrap_or_else(|| format!("sample_{sample_idx}"));
+      results[result_idx].push(("sample_name".to_string(), FormatValue::String(name)));
+    }
+
+    results
+  }
+
+  /// Get the list of FORMAT tag names present in this record.
+  fn get_format_tag_names(&self, header: &Header) -> Vec<(String, Vec<u8>)> {
+    let record_ptr = self.record.inner() as *const rust_htslib::htslib::bcf1_t
+      as *mut rust_htslib::htslib::bcf1_t;
+
+    let n_fmt = unsafe { (*record_ptr).n_fmt() as usize };
+    let fmt_ptr = unsafe { (*record_ptr).d.fmt };
+
+    if fmt_ptr.is_null() || n_fmt == 0 {
+      return Vec::new();
+    }
+
+    let mut tags = Vec::with_capacity(n_fmt);
+    for i in 0..n_fmt {
+      let fmt = unsafe { *fmt_ptr.add(i) };
+      let (tag_name, tag_bytes) = header.id_to_name_cached(fmt.id as u32);
+      tags.push((tag_name, tag_bytes));
+    }
+    tags
   }
 
 

@@ -358,6 +358,26 @@ impl Variant {
     Ok(out.raw())
   }
 
+  #[napi]
+  pub fn samples(&self, env: Env, subset: Option<Vec<String>>) -> napi::Result<sys::napi_value> {
+    let subset_refs: Option<Vec<&str>> = subset.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+    let all_samples = self.inner.samples(&self.header, subset_refs.as_deref());
+
+    let mut arr_items: Vec<sys::napi_value> = Vec::with_capacity(all_samples.len());
+
+    for fields in all_samples {
+      let mut out: Object<'static> = Object::new(&env)?;
+      for (tag, value) in fields {
+        let js_value = formatvalue_to_napi_value(&env, &value)?;
+        out.set_named_property(tag.as_str(), unsafe { Unknown::from_raw_unchecked(env.raw(), js_value) })?;
+      }
+      arr_items.push(out.raw());
+    }
+
+    let arr = Array::from_vec(&env, arr_items)?;
+    Ok(arr.raw())
+  }
+
   #[napi(js_name = "set_info")]
   pub fn set_info(&mut self, tag: String, value: Unknown) -> napi::Result<()> {
     use napi::ValueType;

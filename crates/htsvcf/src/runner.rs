@@ -66,7 +66,7 @@ where
 
     let mut reader = bcf::Reader::from_path(path)?;
 
-    let header_obj = create_header_object(scope, Header::new(reader.header().inner));
+    let header_obj = create_header_object(scope, unsafe { Header::new(reader.header().inner) });
     let global = context.global(scope);
     let header_name = v8::String::new(scope, "header").expect("failed to allocate v8 string");
     global.set(scope, header_name.into(), header_obj.into());

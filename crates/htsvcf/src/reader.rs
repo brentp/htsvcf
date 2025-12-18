@@ -136,7 +136,7 @@ fn reader_ctor(
         }
     };
 
-    let header_obj = create_header_object(scope, Header::new(inner.header_ptr()));
+    let header_obj = create_header_object(scope, unsafe { Header::new(inner.header_ptr()) });
 
     // tie header lifetime to this Reader instance
     let this = args.this();

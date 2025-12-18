@@ -1,8 +1,9 @@
 use rust_htslib::bcf;
 use rust_htslib::bcf::header::{HeaderRecord, TagLength, TagType};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl Drop for Header {
   fn drop(&mut self) {
@@ -16,6 +17,13 @@ impl Drop for Header {
 pub struct Header {
   inner: *mut rust_htslib::htslib::bcf_hdr_t,
   dirty: AtomicBool,
+  /// Cached sample names in header order.
+  sample_names: Vec<String>,
+  /// Cached map from sample name to index for O(1) lookup.
+  sample_name_to_idx: HashMap<String, usize>,
+  /// Cached map from tag ID to (name_string, name_bytes) for O(1) lookup.
+  /// This covers both INFO and FORMAT tags since they share the ID namespace.
+  id_to_name_cache: HashMap<u32, (String, Vec<u8>)>,
 }
 
 unsafe impl Send for Header {}
@@ -31,9 +39,49 @@ impl Header {
   /// `inner` must be a valid pointer to a `bcf_hdr_t`.
   pub unsafe fn new(inner: *mut rust_htslib::htslib::bcf_hdr_t) -> Self {
     let inner = rust_htslib::htslib::bcf_hdr_dup(inner);
+    let view = ManuallyDrop::new(bcf::header::HeaderView::new(inner));
+    let sample_count = view.sample_count();
+    let (sample_names, sample_name_to_idx) = if sample_count > 0 {
+      let names: Vec<String> = view
+        .samples()
+        .iter()
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+      let name_to_idx: HashMap<String, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i))
+        .collect();
+      (names, name_to_idx)
+    } else {
+      (Vec::new(), HashMap::new())
+    };
+
+    // Build id_to_name cache from INFO and FORMAT records
+    let mut id_to_name_cache: HashMap<u32, (String, Vec<u8>)> = HashMap::new();
+    for record in view.header_records() {
+      let tag_id = match &record {
+        HeaderRecord::Info { values, .. } | HeaderRecord::Format { values, .. } => {
+          values.iter().find(|(k, _)| k.as_str() == "ID").map(|(_, v)| v.as_str())
+        }
+        _ => None,
+      };
+      if let Some(tag_name) = tag_id {
+        let tag_bytes = tag_name.as_bytes();
+        if let Ok(id) = view.name_to_id(tag_bytes) {
+          let name = tag_name.to_string();
+          let bytes = tag_bytes.to_vec();
+          id_to_name_cache.insert(id.0, (name, bytes));
+        }
+      }
+    }
+
     Self {
       inner,
       dirty: AtomicBool::new(false),
+      sample_names,
+      sample_name_to_idx,
+      id_to_name_cache,
     }
   }
 
@@ -43,6 +91,9 @@ impl Header {
     Self {
       inner,
       dirty: AtomicBool::new(false),
+      sample_names: Vec::new(),
+      sample_name_to_idx: HashMap::new(),
+      id_to_name_cache: HashMap::new(),
     }
   }
 
@@ -67,6 +118,36 @@ impl Header {
 
   pub fn id_to_name(&self, id: u32) -> Vec<u8> {
     self.view().id_to_name(bcf::header::Id(id))
+  }
+
+  /// Get the cached name for a tag ID, returning both the String and bytes.
+  /// Falls back to id_to_name() if not in cache (e.g., for dynamically added tags).
+  pub fn id_to_name_cached(&self, id: u32) -> (String, Vec<u8>) {
+    if let Some(cached) = self.id_to_name_cache.get(&id) {
+      return cached.clone();
+    }
+    // Fallback for tags added after construction
+    let bytes = self.view().id_to_name(bcf::header::Id(id));
+    let name = String::from_utf8_lossy(&bytes).into_owned();
+    (name, bytes)
+  }
+
+  pub fn sample_count(&self) -> usize {
+    self.sample_names.len()
+  }
+
+  pub fn sample_names(&self) -> &[String] {
+    &self.sample_names
+  }
+
+  /// Get the index of a sample by name, or None if not found.
+  pub fn sample_idx(&self, name: &str) -> Option<usize> {
+    self.sample_name_to_idx.get(name).copied()
+  }
+
+  /// Get a reference to the sample name-to-index map.
+  pub fn sample_name_to_idx(&self) -> &HashMap<String, usize> {
+    &self.sample_name_to_idx
   }
 
   pub fn info_type(&self, tag: &[u8]) -> Option<(TagType, TagLength)> {

@@ -10,3 +10,4 @@ name = "htsvcf"
 [dependencies]
 v8 = "142.2.0"
 rust-htslib.workspace = true
+htsvcf-core = { path = "../htsvcf-core" }
