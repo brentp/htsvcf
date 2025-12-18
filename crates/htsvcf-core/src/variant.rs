@@ -27,6 +27,392 @@ pub enum FormatValue {
   PerSample(Vec<FormatValue>),
 }
 
+// ============================================================================
+// Public helper functions for working with bcf::Record references directly.
+// These allow bindings (like v8) that can't own the record to still use the
+// core logic.
+// ============================================================================
+
+/// Get an INFO field value from a record.
+///
+/// This is the standalone version of `Variant::info()` that can be used when
+/// you have a borrowed reference to a record (e.g., from a GcCell).
+pub fn record_info(record: &bcf::Record, header: &Header, tag: &str) -> InfoValue {
+  let (tag_type, tag_length) = match header.info_type(tag.as_bytes()) {
+    Some(v) => v,
+    None => return InfoValue::Absent,
+  };
+
+  match tag_type {
+    TagType::Flag => match header_info_flag(header, record, tag.as_bytes()) {
+      Ok(v) => InfoValue::Bool(v),
+      Err(InfoError::Absent) => InfoValue::Absent,
+      Err(InfoError::Other) => InfoValue::Absent,
+    },
+    TagType::Integer => match header_info_values_i32(header, record, tag.as_bytes()) {
+      Ok(v) => numeric_to_infovalue(v, tag_length, InfoValue::Int),
+      Err(InfoError::Absent) => InfoValue::Absent,
+      Err(InfoError::Other) => InfoValue::Absent,
+    },
+    TagType::Float => match header_info_values_f32(header, record, tag.as_bytes()) {
+      Ok(v) => numeric_to_infovalue(v, tag_length, InfoValue::Float),
+      Err(InfoError::Absent) => InfoValue::Absent,
+      Err(InfoError::Other) => InfoValue::Absent,
+    },
+    TagType::String => match header_info_values_string(header, record, tag.as_bytes()) {
+      Ok(v) => string_to_infovalue(v, tag_length),
+      Err(InfoError::Absent) => InfoValue::Absent,
+      Err(InfoError::Other) => InfoValue::Absent,
+    },
+  }
+}
+
+/// Get a FORMAT field value from a record (per-sample).
+///
+/// This is the standalone version of `Variant::format()` that can be used when
+/// you have a borrowed reference to a record (e.g., from a GcCell).
+pub fn record_format(record: &bcf::Record, header: &Header, tag: &str) -> FormatValue {
+  let (tag_type, tag_length) = match header.format_type(tag.as_bytes()) {
+    Some(v) => v,
+    None => return FormatValue::Absent,
+  };
+
+  let sample_count = record.sample_count() as usize;
+
+  match tag_type {
+    TagType::Integer => match record.format(tag.as_bytes()).integer() {
+      Ok(values) => FormatValue::PerSample(
+        values
+          .iter()
+          .take(sample_count)
+          .map(|per_sample| format_numeric_to_value(per_sample, tag_length, FormatValue::Int))
+          .collect(),
+      ),
+      Err(_) => FormatValue::Absent,
+    },
+    TagType::Float => match record.format(tag.as_bytes()).float() {
+      Ok(values) => FormatValue::PerSample(
+        values
+          .iter()
+          .take(sample_count)
+          .map(|per_sample| format_numeric_to_value(per_sample, tag_length, FormatValue::Float))
+          .collect(),
+      ),
+      Err(_) => FormatValue::Absent,
+    },
+    TagType::String => match record.format(tag.as_bytes()).string() {
+      Ok(values) => FormatValue::PerSample(
+        values
+          .iter()
+          .take(sample_count)
+          .map(|per_sample| format_string_to_value(*per_sample, tag_length))
+          .collect(),
+      ),
+      Err(_) => FormatValue::Absent,
+    },
+    TagType::Flag => FormatValue::Absent,
+  }
+}
+
+/// Get sample data from a record for a single sample by name.
+///
+/// This is the standalone version of `Variant::sample()` that can be used when
+/// you have a borrowed reference to a record (e.g., from a GcCell).
+pub fn record_sample(
+  record: &bcf::Record,
+  header: &Header,
+  sample: &str,
+) -> Option<Vec<(String, FormatValue)>> {
+  let sample_id = header.sample_id(sample.as_bytes())?;
+  let sample_count = record.sample_count() as usize;
+  if sample_id >= sample_count {
+    return None;
+  }
+
+  let format_tags = get_format_tag_names(header, record);
+  let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(format_tags.len() + 1);
+
+  for (tag_name, tag_bytes) in format_tags {
+    let Some(value) = format_value_for_sample(header, record, &tag_bytes, sample_id) else {
+      continue;
+    };
+    out.push((tag_name, value));
+  }
+
+  // Include the sample name so JS bindings can expose it.
+  // Set it last so it can't be overwritten by a FORMAT tag named "sample_name".
+  out.push((
+    "sample_name".to_string(),
+    FormatValue::String(sample.to_string()),
+  ));
+
+  Some(out)
+}
+
+/// Get sample data from a record for all samples or a subset.
+///
+/// This is the standalone version of `Variant::samples()` that can be used when
+/// you have a borrowed reference to a record (e.g., from a GcCell).
+pub fn record_samples(
+  record: &bcf::Record,
+  header: &Header,
+  subset: Option<&[&str]>,
+) -> Vec<Vec<(String, FormatValue)>> {
+  let sample_count = record.sample_count() as usize;
+  if sample_count == 0 {
+    return Vec::new();
+  }
+
+  let sample_names = header.sample_names();
+  let format_tags = get_format_tag_names(header, record);
+
+  // Determine which sample indices to include and in what order
+  let sample_indices: Vec<usize> = match subset {
+    None => (0..sample_count).collect(),
+    Some(names) => {
+      let name_to_idx = header.sample_name_to_idx();
+      names
+        .iter()
+        .filter_map(|name| name_to_idx.get(*name).copied())
+        .collect()
+    }
+  };
+
+  if sample_indices.is_empty() {
+    return Vec::new();
+  }
+
+  // Pre-allocate result vectors for each requested sample
+  let mut results: Vec<Vec<(String, FormatValue)>> = sample_indices
+    .iter()
+    .map(|_| Vec::with_capacity(format_tags.len() + 1))
+    .collect();
+
+  // For each FORMAT tag, fetch values for ALL samples at once and distribute to requested ones
+  for (tag_name, tag_bytes) in &format_tags {
+    let Some((tag_type, tag_length)) = header.format_type(tag_bytes) else {
+      continue;
+    };
+
+    match tag_type {
+      bcf::header::TagType::Integer => {
+        let Ok(all_values) = record.format(tag_bytes).integer() else {
+          continue;
+        };
+        for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+          if let Some(per_sample) = all_values.get(sample_idx) {
+            let value = format_numeric_to_value(per_sample, tag_length, FormatValue::Int);
+            results[result_idx].push((tag_name.clone(), value));
+          }
+        }
+      }
+      bcf::header::TagType::Float => {
+        let Ok(all_values) = record.format(tag_bytes).float() else {
+          continue;
+        };
+        for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+          if let Some(per_sample) = all_values.get(sample_idx) {
+            let value = format_numeric_to_value(per_sample, tag_length, FormatValue::Float);
+            results[result_idx].push((tag_name.clone(), value));
+          }
+        }
+      }
+      bcf::header::TagType::String => {
+        let Ok(all_values) = record.format(tag_bytes).string() else {
+          continue;
+        };
+        for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+          if let Some(per_sample) = all_values.get(sample_idx) {
+            let value = format_string_to_value(*per_sample, tag_length);
+            results[result_idx].push((tag_name.clone(), value));
+          }
+        }
+      }
+      bcf::header::TagType::Flag => {
+        // Flags are not valid for FORMAT
+      }
+    }
+  }
+
+  // Add sample_name to each result (last, so it can't be overwritten by a FORMAT tag)
+  for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+    let name = sample_names
+      .get(sample_idx)
+      .map(|s| s.clone())
+      .unwrap_or_else(|| format!("sample_{sample_idx}"));
+    results[result_idx].push(("sample_name".to_string(), FormatValue::String(name)));
+  }
+
+  results
+}
+
+/// Get the list of FORMAT tag names present in a record.
+pub fn get_format_tag_names(header: &Header, record: &bcf::Record) -> Vec<(String, Vec<u8>)> {
+  let record_ptr = record.inner() as *const rust_htslib::htslib::bcf1_t
+    as *mut rust_htslib::htslib::bcf1_t;
+
+  let n_fmt = unsafe { (*record_ptr).n_fmt() as usize };
+  let fmt_ptr = unsafe { (*record_ptr).d.fmt };
+
+  if fmt_ptr.is_null() || n_fmt == 0 {
+    return Vec::new();
+  }
+
+  let mut tags = Vec::with_capacity(n_fmt);
+  for i in 0..n_fmt {
+    let fmt = unsafe { *fmt_ptr.add(i) };
+    let (tag_name, tag_bytes) = header.id_to_name_cached(fmt.id as u32);
+    tags.push((tag_name, tag_bytes));
+  }
+  tags
+}
+
+/// Format a record as a VCF line string.
+pub fn record_to_string(record: &bcf::Record, header: &Header) -> Option<String> {
+  let mut s = rust_htslib::htslib::kstring_t {
+    l: 0,
+    m: 0,
+    s: std::ptr::null_mut(),
+  };
+
+  let record_ptr = record.inner() as *const rust_htslib::htslib::bcf1_t
+    as *mut rust_htslib::htslib::bcf1_t;
+
+  let _ = unsafe {
+    rust_htslib::htslib::bcf_unpack(record_ptr, rust_htslib::htslib::BCF_UN_ALL as i32)
+  };
+
+  let ret = unsafe {
+    rust_htslib::htslib::vcf_format(
+      header.inner_ptr() as *const rust_htslib::htslib::bcf_hdr_t,
+      record_ptr as *const rust_htslib::htslib::bcf1_t,
+      &mut s,
+    )
+  };
+  if ret != 0 {
+    if !s.s.is_null() {
+      unsafe { rust_htslib::htslib::free(s.s as *mut std::os::raw::c_void) };
+    }
+    return None;
+  }
+
+  let bytes = unsafe { std::slice::from_raw_parts(s.s as *const u8, s.l as usize) };
+  let text = String::from_utf8_lossy(bytes).into_owned();
+
+  if !s.s.is_null() {
+    unsafe { rust_htslib::htslib::free(s.s as *mut std::os::raw::c_void) };
+  }
+
+  Some(text.trim_end_matches('\n').to_string())
+}
+
+/// Set an INFO flag value on a record.
+pub fn record_set_info_flag(
+  record: &mut bcf::Record,
+  header: &Header,
+  tag: &str,
+  is_set: bool,
+) -> Result<(), rust_htslib::errors::Error> {
+  let (tag_type, _) = header
+    .info_type(tag.as_bytes())
+    .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+  if tag_type != TagType::Flag {
+    return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+  }
+
+  if is_set {
+    record.push_info_flag(tag.as_bytes())?;
+  } else {
+    record.clear_info_flag(tag.as_bytes())?;
+  }
+
+  record.unpack();
+  Ok(())
+}
+
+/// Set an INFO integer value on a record.
+pub fn record_set_info_integer(
+  record: &mut bcf::Record,
+  header: &Header,
+  tag: &str,
+  values: &[i32],
+) -> Result<(), rust_htslib::errors::Error> {
+  let (tag_type, _) = header
+    .info_type(tag.as_bytes())
+    .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+  if tag_type != TagType::Integer {
+    return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+  }
+
+  record.push_info_integer(tag.as_bytes(), values)?;
+  record.unpack();
+  Ok(())
+}
+
+/// Set an INFO float value on a record.
+pub fn record_set_info_float(
+  record: &mut bcf::Record,
+  header: &Header,
+  tag: &str,
+  values: &[f32],
+) -> Result<(), rust_htslib::errors::Error> {
+  let (tag_type, _) = header
+    .info_type(tag.as_bytes())
+    .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+  if tag_type != TagType::Float {
+    return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+  }
+
+  record.push_info_float(tag.as_bytes(), values)?;
+  record.unpack();
+  Ok(())
+}
+
+/// Set an INFO string value on a record.
+pub fn record_set_info_string(
+  record: &mut bcf::Record,
+  header: &Header,
+  tag: &str,
+  values: &[String],
+) -> Result<(), rust_htslib::errors::Error> {
+  let (tag_type, _) = header
+    .info_type(tag.as_bytes())
+    .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+  if tag_type != TagType::String {
+    return Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() });
+  }
+
+  let refs: Vec<&[u8]> = values.iter().map(|s| s.as_bytes()).collect();
+  record.push_info_string(tag.as_bytes(), &refs)?;
+  record.unpack();
+  Ok(())
+}
+
+/// Clear an INFO field from a record.
+pub fn record_clear_info(
+  record: &mut bcf::Record,
+  header: &Header,
+  tag: &str,
+) -> Result<(), rust_htslib::errors::Error> {
+  let (tag_type, _) = header
+    .info_type(tag.as_bytes())
+    .ok_or_else(|| rust_htslib::errors::Error::BcfUndefinedTag { tag: tag.to_string() })?;
+
+  match tag_type {
+    TagType::Flag => record.clear_info_flag(tag.as_bytes())?,
+    TagType::Integer => record.clear_info_integer(tag.as_bytes())?,
+    TagType::Float => record.clear_info_float(tag.as_bytes())?,
+    TagType::String => record.clear_info_string(tag.as_bytes())?,
+  }
+
+  record.unpack();
+  Ok(())
+}
+
 #[derive(Debug)]
 pub struct Variant {
   record: bcf::Record,

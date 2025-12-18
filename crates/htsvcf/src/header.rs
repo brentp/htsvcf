@@ -24,11 +24,6 @@ impl Header {
         }
     }
 
-    /// Get the raw header pointer.
-    pub(crate) fn inner_ptr(&self) -> *mut rust_htslib::htslib::bcf_hdr_t {
-        self.inner.inner_ptr()
-    }
-
     /// Return parsed header records.
     pub fn header_records(&self) -> Vec<HeaderRecord> {
         self.inner.header_records()
@@ -97,6 +92,11 @@ impl Header {
     /// Format header as string.
     pub fn to_string(&self) -> Option<String> {
         self.inner.to_string()
+    }
+
+    /// Get a reference to the inner core Header.
+    pub fn inner(&self) -> &htsvcf_core::Header {
+        &self.inner
     }
 }
 
