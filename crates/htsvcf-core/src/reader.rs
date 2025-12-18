@@ -87,16 +87,31 @@ impl Reader {
 
   pub fn query_region_1based(&mut self, region: &str) -> Result<(), rust_htslib::errors::Error> {
     let (chrom, start0, end0) = parse_region_1based(region).ok_or(rust_htslib::errors::Error::Fetch)?;
-    self.query(&chrom, start0, end0)
+    self.query_chrom_start_end(&chrom, start0, end0)
   }
 
-  pub fn query(
+  pub fn query_chrom_start_end(
     &mut self,
     chrom: &str,
     start0: u64,
     end0: Option<u64>,
   ) -> Result<(), rust_htslib::errors::Error> {
     self.inner.fetch(chrom, start0, end0)
+  }
+
+  /// Query by region string ("chr1:1000-2000") or by coordinates.
+  /// If `start0` is None, treat `region_or_chrom` as a region string.
+  /// Otherwise, treat it as a chromosome name with numeric coordinates.
+  pub fn query(
+    &mut self,
+    region_or_chrom: &str,
+    start0: Option<u64>,
+    end0: Option<u64>,
+  ) -> Result<(), rust_htslib::errors::Error> {
+    match start0 {
+      None => self.query_region_1based(region_or_chrom),
+      Some(s) => self.query_chrom_start_end(region_or_chrom, s, end0),
+    }
   }
 
   pub fn next_record(&mut self) -> Result<Option<bcf::Record>, rust_htslib::errors::Error> {

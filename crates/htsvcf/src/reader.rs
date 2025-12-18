@@ -211,21 +211,15 @@ fn reader_query_fn(
         return;
     }
 
-    let result = if args.length() == 1 {
-        let Ok(region_str) = v8::Local::<v8::String>::try_from(args.get(0)) else {
-            throw_type_error(scope, "query(region) requires a string");
-            return;
-        };
-        let region = region_str.to_rust_string_lossy(scope);
-        let inner = reader.inner.get_mut(scope);
-        inner.query_region_1based(&region)
-    } else {
-        let Ok(chrom_str) = v8::Local::<v8::String>::try_from(args.get(0)) else {
-            throw_type_error(scope, "query(chrom, start, end?) requires chrom string");
-            return;
-        };
-        let chrom = chrom_str.to_rust_string_lossy(scope);
+    // First argument is always a string (region or chrom)
+    let Ok(first_str) = v8::Local::<v8::String>::try_from(args.get(0)) else {
+        throw_type_error(scope, "query() first argument must be a string");
+        return;
+    };
+    let region_or_chrom = first_str.to_rust_string_lossy(scope);
 
+    // Extract optional start (if present, we're in chrom/start/end mode)
+    let start0 = if args.length() >= 2 {
         let Ok(start_num) = v8::Local::<v8::Number>::try_from(args.get(1)) else {
             throw_type_error(scope, "query(chrom, start, end?) requires numeric start");
             return;
@@ -235,31 +229,29 @@ fn reader_query_fn(
             throw_type_error(scope, "query start must be >= 0");
             return;
         }
-
-        let end = if args.length() >= 3 {
-            if args.get(2).is_undefined() || args.get(2).is_null() {
-                None
-            } else {
-                let Ok(end_num) = v8::Local::<v8::Number>::try_from(args.get(2)) else {
-                    throw_type_error(scope, "query(chrom, start, end?) requires numeric end");
-                    return;
-                };
-                let end = end_num.value() as i64;
-                if end < 0 {
-                    throw_type_error(scope, "query end must be >= 0");
-                    return;
-                }
-                Some(end as u64)
-            }
-        } else {
-            None
-        };
-
-        let inner = reader.inner.get_mut(scope);
-        inner.query(&chrom, start as u64, end)
+        Some(start as u64)
+    } else {
+        None
     };
 
-    match result {
+    // Extract optional end
+    let end0 = if args.length() >= 3 && !args.get(2).is_undefined() && !args.get(2).is_null() {
+        let Ok(end_num) = v8::Local::<v8::Number>::try_from(args.get(2)) else {
+            throw_type_error(scope, "query(chrom, start, end?) requires numeric end");
+            return;
+        };
+        let end = end_num.value() as i64;
+        if end < 0 {
+            throw_type_error(scope, "query end must be >= 0");
+            return;
+        }
+        Some(end as u64)
+    } else {
+        None
+    };
+
+    let inner = reader.inner.get_mut(scope);
+    match inner.query(&region_or_chrom, start0, end0) {
         Ok(()) => rv.set(v8::undefined(scope).into()),
         Err(e) => throw_error(scope, &format!("query failed: {e}")),
     }

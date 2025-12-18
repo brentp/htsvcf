@@ -174,18 +174,13 @@ impl Task for QueryTask {
       ));
     }
 
-    match self.start0 {
-      None => reader
-        .query_region_1based(&self.region_or_chrom)
-        .map_err(|e| Error::new(Status::GenericFailure, format!("query failed: {e}")))?,
-      Some(start0) => reader
-        .query(
-          &self.region_or_chrom,
-          start0 as u64,
-          self.end0.map(|v| v as u64),
-        )
-        .map_err(|e| Error::new(Status::GenericFailure, format!("query failed: {e}")))?,
-    };
+    reader
+      .query(
+        &self.region_or_chrom,
+        self.start0.map(|v| v as u64),
+        self.end0.map(|v| v as u64),
+      )
+      .map_err(|e| Error::new(Status::GenericFailure, format!("query failed: {e}")))?;
 
     Ok(())
   }
