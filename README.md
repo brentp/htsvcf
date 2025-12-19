@@ -32,7 +32,9 @@ let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 20")?;
 for result in reader.records() {
     let record = result?;
     if js_eval.eval::<bool>(record)? {
-        println!("passed filter");
+        // Use take() to get ownership of the record
+        let record = js_eval.take().unwrap();
+        // write record to output, collect it, etc.
     }
 }
 ```

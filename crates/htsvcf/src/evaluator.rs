@@ -325,6 +325,52 @@ impl Evaluator {
         // Deserialize using serde_v8
         serde_v8::from_v8(scope, result).map_err(|e| EvalError::RuntimeError(e.to_string()))
     }
+
+    /// Take ownership of the bcf::Record from the last evaluated variant.
+    ///
+    /// Returns `None` if:
+    /// - No record has been evaluated yet
+    /// - `take()` was already called without a subsequent `eval()`
+    ///
+    /// After calling this, accessing variant fields will panic until the next
+    /// `eval()` call creates a new variant.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use htsvcf::Evaluator;
+    /// use rust_htslib::bcf::{self, Read};
+    ///
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 10").unwrap();
+    ///
+    /// for result in reader.records() {
+    ///     let record = result.unwrap();
+    ///     let passes: bool = js_eval.eval(record).unwrap();
+    ///     if passes {
+    ///         let record = js_eval.take().unwrap();
+    ///         // write record to output...
+    ///     }
+    /// }
+    /// ```
+    pub fn take(&mut self) -> Option<bcf::Record> {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let global = context.global(scope);
+        let variant_name = v8::String::new(scope, "variant")?;
+        let variant_val = global.get(scope, variant_name.into())?;
+        let variant_obj = v8::Local::<v8::Object>::try_from(variant_val).ok()?;
+
+        let wrapper =
+            unsafe { v8::Object::unwrap::<{ crate::variant::TAG }, Variant>(scope, variant_obj) }?;
+        let variant = unsafe { wrapper.as_ref() };
+
+        variant.take_record(scope)
+    }
 }
 
 #[cfg(test)]
@@ -841,6 +887,67 @@ mod tests {
 
         assert_eq!(result.depth, Some(10));
         assert_eq!(result.missing, None);
+    }
+
+    #[test]
+    fn test_take_returns_none_before_eval() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+
+        assert!(js_eval.take().is_none());
+    }
+
+    #[test]
+    fn test_take_returns_record_after_eval() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let pos: i64 = js_eval.eval(record).unwrap();
+        assert_eq!(pos, 1000);
+
+        let taken = js_eval.take();
+        assert!(taken.is_some());
+
+        let taken_record = taken.unwrap();
+        assert_eq!(taken_record.pos() + 1, 1000); // 0-based internally
+    }
+
+    #[test]
+    fn test_take_returns_none_after_second_call() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let _: i64 = js_eval.eval(record).unwrap();
+
+        assert!(js_eval.take().is_some());
+        assert!(js_eval.take().is_none());
+    }
+
+    #[test]
+    fn test_take_works_across_multiple_evals() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+
+        let mut records = reader.records();
+
+        // First record
+        let record1 = records.next().unwrap().unwrap();
+        let _: i64 = js_eval.eval(record1).unwrap();
+        let taken1 = js_eval.take().unwrap();
+
+        // Second record
+        let record2 = records.next().unwrap().unwrap();
+        let _: i64 = js_eval.eval(record2).unwrap();
+        let taken2 = js_eval.take().unwrap();
+
+        // Verify they're different records (different positions)
+        assert_ne!(taken1.pos(), taken2.pos());
     }
 }
 

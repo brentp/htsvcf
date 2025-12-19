@@ -111,7 +111,7 @@ const HEADER_INTERNAL_FIELD_INDEX: usize = 1;
 /// single iteration in [`runner::run_vcf_expr_with`].
 #[derive(Debug)]
 pub struct Variant {
-    record: v8::cppgc::GcCell<bcf::Record>,
+    record: v8::cppgc::GcCell<Option<bcf::Record>>,
     chrom: String,
 }
 
@@ -129,9 +129,32 @@ impl Variant {
             None => ".".to_string(),
         };
         Self {
-            record: v8::cppgc::GcCell::new(record),
+            record: v8::cppgc::GcCell::new(Some(record)),
             chrom,
         }
+    }
+
+    /// Get a reference to the record, panicking if taken.
+    #[inline]
+    fn record<'a>(&'a self, scope: &'a v8::PinScope<'_, '_>) -> &'a bcf::Record {
+        self.record
+            .get(scope)
+            .as_ref()
+            .expect("record was taken")
+    }
+
+    /// Get a mutable reference to the record, panicking if taken.
+    #[inline]
+    fn record_mut<'a>(&'a self, scope: &'a mut v8::PinScope<'_, '_>) -> &'a mut bcf::Record {
+        self.record
+            .get_mut(scope)
+            .as_mut()
+            .expect("record was taken")
+    }
+
+    /// Take ownership of the record, leaving None.
+    pub fn take_record(&self, scope: &mut v8::PinScope<'_, '_>) -> Option<bcf::Record> {
+        self.record.get_mut(scope).take()
     }
 
     /// Chromosome/contig name.
@@ -141,22 +164,22 @@ impl Variant {
 
     /// Zero-based start coordinate.
     pub fn start(&self, scope: &v8::PinScope<'_, '_>) -> i64 {
-        self.record.get(scope).pos()
+        self.record(scope).pos()
     }
 
     /// One-based POS field.
     pub fn pos(&self, scope: &v8::PinScope<'_, '_>) -> i64 {
-        self.record.get(scope).pos() + 1
+        self.record(scope).pos() + 1
     }
 
     /// End coordinate (htslib semantics).
     pub fn end(&self, scope: &v8::PinScope<'_, '_>) -> i64 {
-        self.record.get(scope).end()
+        self.record(scope).end()
     }
 
     /// `ID` field as a string.
     pub fn id(&self, scope: &v8::PinScope<'_, '_>) -> String {
-        String::from_utf8_lossy(&self.record.get(scope).id()).into_owned()
+        String::from_utf8_lossy(&self.record(scope).id()).into_owned()
     }
 
     /// Set the `ID` field.
@@ -168,7 +191,7 @@ impl Variant {
         id: &str,
     ) -> Result<(), rust_htslib::errors::Error> {
         let id = if id.is_empty() { "." } else { id };
-        let record = self.record.get_mut(scope);
+        let record = self.record_mut(scope);
         record.set_id(id.as_bytes())?;
         record.unpack();
         Ok(())
@@ -176,8 +199,7 @@ impl Variant {
 
     /// Reference allele.
     pub fn reference(&self, scope: &v8::PinScope<'_, '_>) -> String {
-        self.record
-            .get(scope)
+        self.record(scope)
             .alleles()
             .first()
             .map(|a| String::from_utf8_lossy(a).into_owned())
@@ -186,8 +208,7 @@ impl Variant {
 
     /// Alternate alleles.
     pub fn alts(&self, scope: &v8::PinScope<'_, '_>) -> Vec<String> {
-        self.record
-            .get(scope)
+        self.record(scope)
             .alleles()
             .into_iter()
             .skip(1)
@@ -197,7 +218,7 @@ impl Variant {
 
     /// QUAL field, or `None` when missing.
     pub fn qual(&self, scope: &v8::PinScope<'_, '_>) -> Option<f32> {
-        let qual = self.record.get(scope).qual();
+        let qual = self.record(scope).qual();
         if qual.is_missing() {
             None
         } else {
@@ -213,7 +234,7 @@ impl Variant {
         scope: &mut v8::PinScope<'_, '_>,
         qual: Option<f32>,
     ) {
-        let record = self.record.get_mut(scope);
+        let record = self.record_mut(scope);
         match qual {
             Some(v) => record.set_qual(v),
             None => record.set_qual(<f32 as Numeric>::missing()),
@@ -224,7 +245,7 @@ impl Variant {
     ///
     /// Records that are '' (or '.') return an empty list.
     pub fn filters(&self, scope: &v8::PinScope<'_, '_>) -> Vec<String> {
-        let record = self.record.get(scope);
+        let record = self.record(scope);
         let header = record.header();
         let mut out = Vec::new();
         for id in record.filters() {
@@ -242,7 +263,7 @@ impl Variant {
         scope: &mut v8::PinScope<'_, '_>,
         filters: &[String],
     ) -> Result<(), rust_htslib::errors::Error> {
-        let record = self.record.get_mut(scope);
+        let record = self.record_mut(scope);
         let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0].is_empty() || filters[0] == "."));
         if want_clear {
             let refs: Vec<&[u8]> = Vec::new();
@@ -649,7 +670,7 @@ fn set_info_fn(
     };
 
     let res = {
-        let record = variant.record.get_mut(scope);
+        let record = variant.record_mut(scope);
         let out = match (tag_type, parsed) {
             (_, InfoWriteValue::Clear) => match tag_type {
                 TagType::Flag => record.clear_info_flag(tag_bytes),
@@ -717,7 +738,7 @@ fn info_fn(
             .expect("Failed to unwrap Header");
     let header: &header::Header = unsafe { header_wrapper.as_ref() };
 
-    let record = variant.record.get(scope);
+    let record = variant.record(scope);
     let value = htsvcf_core::record_info(record, header.inner(), &tag);
     rv.set(infovalue_to_v8(scope, &value));
 }
@@ -762,7 +783,7 @@ fn format_fn(
             .expect("Failed to unwrap Header");
     let header: &header::Header = unsafe { header_wrapper.as_ref() };
 
-    let record = variant.record.get(scope);
+    let record = variant.record(scope);
     let value = htsvcf_core::record_format(record, header.inner(), &tag);
     rv.set(formatvalue_to_v8(scope, &value));
 }
@@ -805,7 +826,7 @@ fn sample_fn(
             .expect("Failed to unwrap Header");
     let header: &header::Header = unsafe { header_wrapper.as_ref() };
 
-    let record = variant.record.get(scope);
+    let record = variant.record(scope);
     let Some(fields) = htsvcf_core::record_sample(record, header.inner(), &sample_name) else {
         rv.set(v8::undefined(scope).into());
         return;
@@ -876,7 +897,7 @@ fn samples_fn(
         None
     };
 
-    let record = variant.record.get(scope);
+    let record = variant.record(scope);
     let subset_refs: Option<Vec<&str>> = subset_names.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
     let results = htsvcf_core::record_samples(record, header.inner(), subset_refs.as_deref());
 
@@ -922,7 +943,7 @@ fn to_string_fn(
             .expect("Failed to unwrap Header");
     let header: &header::Header = unsafe { header_wrapper.as_ref() };
 
-    let record = variant.record.get(scope);
+    let record = variant.record(scope);
     match htsvcf_core::record_to_string(record, header.inner()) {
         Some(text) => {
             let out = v8::String::new(scope, &text).unwrap();

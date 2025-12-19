@@ -88,22 +88,55 @@ Use `eval::<bool>()` to filter variants:
 
 ```rust
 use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read, Write};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let header = bcf::Header::from_template(reader.header());
+    let mut writer = bcf::Writer::from_path("output.vcf.gz", &header, true, bcf::Format::Vcf)?;
+    
+    let mut js_eval = Evaluator::new(
+        reader.header(),
+        "variant.info('DP') > 20 && variant.qual > 30"
+    )?;
+
+    for result in reader.records() {
+        let record = result?;
+        if js_eval.eval::<bool>(record)? {
+            // Use take() to get ownership of the record for writing
+            let record = js_eval.take().unwrap();
+            writer.write(&record)?;
+        }
+    }
+    Ok(())
+}
+```
+
+#### Extracting Records with `take()`
+
+After calling `eval()`, use `take()` to get ownership of the `bcf::Record`:
+
+```rust
+use htsvcf::Evaluator;
 use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
     let mut js_eval = Evaluator::new(
         reader.header(),
-        "variant.info('DP') > 20 && variant.qual > 30"
+        "variant.info('DP') > 10"
     )?;
 
-    let mut passed = 0;
     for result in reader.records() {
-        if js_eval.eval::<bool>(result?)? {
-            passed += 1;
+        let record = result?;
+        let passes: bool = js_eval.eval(record)?;
+        if passes {
+            // take() returns Option<bcf::Record>
+            // Returns None if called before eval() or called twice without eval()
+            let record = js_eval.take().unwrap();
+            // Use the record (write to file, collect, etc.)
         }
     }
-    println!("{} variants passed filter", passed);
     Ok(())
 }
 ```
