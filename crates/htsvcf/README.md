@@ -50,6 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+`eval` accepts an owned `bcf::Record`, `Arc<bcf::Record>`, or `Arc<Mutex<bcf::Record>>`.
+When using shared ownership, the record is cloned internally for evaluation.
+
 ### Evaluator API
 
 #### Supported Types

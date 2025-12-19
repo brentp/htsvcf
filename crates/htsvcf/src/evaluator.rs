@@ -23,6 +23,7 @@
 //! ```
 
 use rust_htslib::bcf;
+use std::sync::{Arc, Mutex};
 
 use crate::fromjs::FromJsValue;
 use crate::header::{create_header_object, Header};
@@ -52,6 +53,43 @@ impl std::fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
+/// Types that can be converted into an owned `bcf::Record` for evaluation.
+pub trait RecordInput {
+    /// Convert into an owned `bcf::Record`.
+    fn into_record(self) -> Result<bcf::Record, EvalError>;
+}
+
+impl RecordInput for bcf::Record {
+    fn into_record(self) -> Result<bcf::Record, EvalError> {
+        Ok(self)
+    }
+}
+
+impl RecordInput for Arc<bcf::Record> {
+    fn into_record(self) -> Result<bcf::Record, EvalError> {
+        match Arc::try_unwrap(self) {
+            Ok(record) => Ok(record),
+            Err(arc) => Ok((*arc).clone()),
+        }
+    }
+}
+
+impl RecordInput for Arc<Mutex<bcf::Record>> {
+    fn into_record(self) -> Result<bcf::Record, EvalError> {
+        match Arc::try_unwrap(self) {
+            Ok(mutex) => mutex.into_inner().map_err(|e| {
+                EvalError::RuntimeError(format!(
+                    "failed to unwrap record mutex (lock poisoned): {e}"
+                ))
+            }),
+            Err(arc) => arc
+                .lock()
+                .map(|r| r.clone())
+                .map_err(|e| EvalError::RuntimeError(format!("failed to lock record: {e}"))),
+        }
+    }
+}
+
 /// A reusable evaluator for applying JavaScript expressions to VCF records.
 ///
 /// The evaluator compiles the JS expression once and can then be used to
@@ -68,7 +106,7 @@ impl std::error::Error for EvalError {}
 ///
 /// for result in reader.records() {
 ///     let record = result.unwrap();
-///     if js_eval.eval::<bool>(record).unwrap() {
+///     if js_eval.eval::<bool, _>(record).unwrap() {
 ///         println!("Record passed filter");
 ///     }
 /// }
@@ -171,8 +209,10 @@ impl Evaluator {
 
     /// Evaluate the JS expression on a record and convert the result to type `T`.
     ///
-    /// Takes ownership of the record. If you need to keep the record, clone
-    /// it before calling this method.
+    /// Accepts an owned `bcf::Record`, `Arc<bcf::Record>`, or `Arc<Mutex<bcf::Record>>`.
+    /// The record is cloned internally when wrapped in `Arc`/`Arc<Mutex<_>>`. When using
+    /// a mutex, evaluation waits for the lock and returns a `RuntimeError` if the mutex
+    /// is poisoned.
     ///
     /// # Type Parameter
     ///
@@ -230,8 +270,9 @@ impl Evaluator {
     /// let record = reader.records().next().unwrap().unwrap();
     /// let maybe: Option<i32> = js_eval.eval(record).unwrap();
     /// ```
-    pub fn eval<T: FromJsValue>(&mut self, record: bcf::Record) -> Result<T, EvalError> {
+    pub fn eval<T: FromJsValue, R: RecordInput>(&mut self, record: R) -> Result<T, EvalError> {
         let _guard = runtime::v8_lock();
+        let record = record.into_record()?;
 
         v8::scope!(handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
@@ -290,11 +331,13 @@ impl Evaluator {
     /// let record = reader.records().next().unwrap().unwrap();
     /// let info: VariantInfo = js_eval.eval_serde(record).unwrap();
     /// ```
-    pub fn eval_serde<'de, T>(&mut self, record: bcf::Record) -> Result<T, EvalError>
+    pub fn eval_serde<'de, T, R>(&mut self, record: R) -> Result<T, EvalError>
     where
         T: serde::Deserialize<'de>,
+        R: RecordInput,
     {
         let _guard = runtime::v8_lock();
+        let record = record.into_record()?;
 
         v8::scope!(handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
@@ -333,6 +376,7 @@ mod tests {
     use rust_htslib::bcf::Read;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     fn fixture_vcf() -> String {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -441,25 +485,29 @@ mod tests {
         // Truthy: non-zero number
         let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(js_eval.eval::<bool>(record).unwrap());
+        let result: bool = js_eval.eval(record).unwrap();
+        assert!(result);
 
         // Falsy: zero
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header(), "0").unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(!js_eval.eval::<bool>(record).unwrap());
+        let result: bool = js_eval.eval(record).unwrap();
+        assert!(!result);
 
         // Falsy: empty string
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header(), "''").unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(!js_eval.eval::<bool>(record).unwrap());
+        let result: bool = js_eval.eval(record).unwrap();
+        assert!(!result);
 
         // Falsy: undefined
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header(), "variant.info('NONEXISTENT')").unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(!js_eval.eval::<bool>(record).unwrap());
+        let result: bool = js_eval.eval(record).unwrap();
+        assert!(!result);
     }
 
     #[test]
@@ -529,6 +577,38 @@ mod tests {
         let record = reader.records().next().unwrap().unwrap();
         let result: Option<String> = js_eval.eval(record).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_eval_with_arc_record() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+
+        let record = Arc::new(reader.records().next().unwrap().unwrap());
+        let result: i32 = js_eval.eval(record.clone()).unwrap();
+        assert_eq!(result, 10);
+        // Original Arc still usable.
+        let dp = record.info(b"DP").integer().unwrap().expect("missing DP");
+        assert_eq!(dp.first(), Some(&10));
+    }
+
+    #[test]
+    fn test_eval_with_arc_mutex_record() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+
+        let record = Arc::new(Mutex::new(reader.records().next().unwrap().unwrap()));
+        let result: i32 = js_eval.eval(record.clone()).unwrap();
+        assert_eq!(result, 10);
+
+        // Underlying record remains accessible.
+        let guard = record
+            .lock()
+            .expect("expected Arc<Mutex<bcf::Record>> to be unlocked");
+        let dp = guard.info(b"DP").integer().unwrap().expect("missing DP");
+        assert_eq!(dp.first(), Some(&10));
     }
 
     #[test]
@@ -624,8 +704,7 @@ mod tests {
     fn test_runtime_error() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval =
-            Evaluator::new(reader.header(), "throw new Error('test error')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "throw new Error('test error')").unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
         let result: Result<String, EvalError> = js_eval.eval(record);
@@ -771,11 +850,8 @@ mod tests {
     fn test_eval_serde_json_value() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "({ pos: variant.pos, alt: variant.alt })",
-        )
-        .unwrap();
+        let mut js_eval =
+            Evaluator::new(reader.header(), "({ pos: variant.pos, alt: variant.alt })").unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
         let result: serde_json::Value = js_eval.eval_serde(record).unwrap();
@@ -843,4 +919,3 @@ mod tests {
         assert_eq!(result.missing, None);
     }
 }
-
