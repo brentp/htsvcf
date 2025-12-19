@@ -42,7 +42,7 @@ fn main() -> Result<(), AnyError> {
 
     let mut reader = bcf::Reader::from_path(&args.input)?;
     reader.set_threads(args.threads)?;
-    let mut evaluator = Evaluator::new(reader.header(), &args.js_expr)?;
+    let mut evaluator = Evaluator::new(reader.header())?;
 
     let stdout = std::io::stdout().lock();
     let mut writer = BufWriter::new(stdout);
@@ -50,9 +50,10 @@ fn main() -> Result<(), AnyError> {
     let mut record = reader.empty_record();
     while let Some(result) = reader.read(&mut record) {
         result?;
-        let output: String = evaluator.eval(record)?;
+        evaluator.set_record(record);
+        let output: String = evaluator.eval(&args.js_expr)?;
         writeln!(writer, "{:}", output)?;
-        record = reader.empty_record();
+        record = evaluator.take().unwrap_or_else(|| reader.empty_record());
     }
 
     writer.flush()?;

@@ -157,6 +157,11 @@ impl Variant {
         self.record.get_mut(scope).take()
     }
 
+    /// Check if the record is still present (not taken).
+    pub fn has_record(&self, scope: &v8::PinScope<'_, '_>) -> bool {
+        self.record.get(scope).is_some()
+    }
+
     /// Chromosome/contig name.
     pub fn chrom(&self) -> &str {
         &self.chrom

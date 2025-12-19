@@ -3,6 +3,16 @@
 //! The [`Evaluator`] struct provides a way to iterate over VCF records in Rust
 //! while applying user-defined JavaScript expressions to each record.
 //!
+//! # Expression Caching
+//!
+//! Expressions are compiled to JavaScript on first use and cached by their
+//! exact string value. Subsequent calls with the same expression string
+//! reuse the compiled script. The cache holds up to 8192 unique expressions;
+//! attempting to add more returns [`EvalError::CacheFull`].
+//!
+//! For best performance, reuse the same expression strings across records
+//! rather than generating dynamic expression strings per-record.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -11,16 +21,26 @@
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-//!     let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')")?;
+//!     let mut eval = Evaluator::new(reader.header())?;
 //!
 //!     for result in reader.records() {
 //!         let record = result?;
-//!         let dp: i32 = js_eval.eval(record)?;
-//!         println!("DP = {}", dp);
+//!         eval.set_record(record);
+//!
+//!         // Expressions are compiled on first use, cached for subsequent records
+//!         let dp: i32 = eval.eval("variant.info('DP')")?;
+//!         let passes: bool = eval.eval("variant.info('DP') > 20")?;
+//!
+//!         if passes {
+//!             let record = eval.take().unwrap();
+//!             // write record...
+//!         }
 //!     }
 //!     Ok(())
 //! }
 //! ```
+
+use std::collections::HashMap;
 
 use rust_htslib::bcf;
 
@@ -28,6 +48,9 @@ use crate::fromjs::FromJsValue;
 use crate::header::{create_header_object, Header};
 use crate::runtime;
 use crate::variant::{create_object_template, create_variant_object, Variant};
+
+/// Maximum number of unique expressions that can be cached.
+const MAX_CACHED_EXPRESSIONS: usize = 8192;
 
 /// Errors that can occur during JavaScript evaluation.
 #[derive(Debug)]
@@ -38,6 +61,11 @@ pub enum EvalError {
     CompileError(String),
     /// JavaScript runtime error during evaluation.
     RuntimeError(String),
+    /// No record has been set via `set_record()`.
+    NoRecord,
+    /// Expression cache is full (more than 8192 unique expressions).
+    /// Consider reusing expression strings rather than generating unique ones.
+    CacheFull,
 }
 
 impl std::fmt::Display for EvalError {
@@ -46,6 +74,12 @@ impl std::fmt::Display for EvalError {
             EvalError::V8Setup(msg) => write!(f, "V8 setup error: {}", msg),
             EvalError::CompileError(msg) => write!(f, "JS compile error: {}", msg),
             EvalError::RuntimeError(msg) => write!(f, "JS runtime error: {}", msg),
+            EvalError::NoRecord => write!(f, "no record set; call set_record() before eval()"),
+            EvalError::CacheFull => write!(
+                f,
+                "expression cache full (>{} unique expressions); consider reusing expression strings",
+                MAX_CACHED_EXPRESSIONS
+            ),
         }
     }
 }
@@ -54,8 +88,15 @@ impl std::error::Error for EvalError {}
 
 /// A reusable evaluator for applying JavaScript expressions to VCF records.
 ///
-/// The evaluator compiles the JS expression once and can then be used to
-/// evaluate it against multiple records efficiently.
+/// The evaluator compiles JS expressions on first use and caches them for
+/// efficient reuse. Multiple different expressions can be evaluated against
+/// the same record.
+///
+/// # Expression Caching
+///
+/// Expressions are cached by their exact string value. The cache holds up to
+/// 8192 unique expressions. For best performance, reuse the same expression
+/// strings across records rather than generating dynamic strings per-record.
 ///
 /// # Example
 ///
@@ -64,12 +105,20 @@ impl std::error::Error for EvalError {}
 /// use rust_htslib::bcf::{self, Read};
 ///
 /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-/// let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 20").unwrap();
+/// let mut eval = Evaluator::new(reader.header()).unwrap();
 ///
 /// for result in reader.records() {
 ///     let record = result.unwrap();
-///     if js_eval.eval::<bool>(record).unwrap() {
-///         println!("Record passed filter");
+///     eval.set_record(record);
+///
+///     // Multiple expressions can be evaluated against the same record
+///     let dp: i32 = eval.eval("variant.info('DP')").unwrap();
+///     let passes: bool = eval.eval("variant.info('DP') > 20").unwrap();
+///     let loc: String = eval.eval("variant.chrom + ':' + variant.pos").unwrap();
+///
+///     if passes {
+///         let record = eval.take().unwrap();
+///         // write record to output...
 ///     }
 /// }
 /// ```
@@ -78,8 +127,8 @@ pub struct Evaluator {
     isolate: v8::OwnedIsolate,
     /// Persistent handle to the JS context.
     context: v8::Global<v8::Context>,
-    /// Persistent handle to the compiled script.
-    script: v8::Global<v8::Script>,
+    /// Cached compiled scripts keyed by expression string.
+    scripts: HashMap<String, v8::Global<v8::Script>>,
     /// Persistent handle to the variant object template.
     object_template: v8::Global<v8::ObjectTemplate>,
     /// Persistent handle to the header JS object.
@@ -87,21 +136,19 @@ pub struct Evaluator {
 }
 
 impl Evaluator {
-    /// Create a new evaluator with a compiled JS expression.
+    /// Create a new evaluator.
     ///
-    /// The evaluator compiles the given JavaScript expression and prepares
-    /// the V8 runtime for evaluation. The header is used to resolve INFO
-    /// and FORMAT field types.
+    /// The evaluator is initialized with the VCF header but no record or
+    /// expressions. Call [`set_record`](Self::set_record) to set a record,
+    /// then [`eval`](Self::eval) to evaluate expressions.
     ///
     /// # Arguments
     ///
     /// * `header` - The VCF header (from `reader.header()`)
-    /// * `js_expr` - A JavaScript expression to evaluate per record
     ///
     /// # Errors
     ///
-    /// Returns `EvalError::CompileError` if the JavaScript expression has
-    /// syntax errors.
+    /// Returns `EvalError::V8Setup` if V8 initialization fails.
     ///
     /// # Example
     ///
@@ -110,9 +157,9 @@ impl Evaluator {
     /// use rust_htslib::bcf::{self, Read};
     ///
     /// let reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let eval = Evaluator::new(reader.header(), "variant.chrom + ':' + variant.pos").unwrap();
+    /// let eval = Evaluator::new(reader.header()).unwrap();
     /// ```
-    pub fn new(header: &bcf::header::HeaderView, js_expr: &str) -> Result<Self, EvalError> {
+    pub fn new(header: &bcf::header::HeaderView) -> Result<Self, EvalError> {
         let platform = runtime::ensure_v8_initialized().clone();
         let _guard = runtime::v8_lock();
 
@@ -120,7 +167,7 @@ impl Evaluator {
         let mut isolate = v8::Isolate::new(v8::CreateParams::default().cpp_heap(heap));
 
         // Create globals inside a temporary scope
-        let (context, script, object_template, header_obj) = {
+        let (context, object_template, header_obj) = {
             v8::scope!(handle_scope, &mut isolate);
             let context = v8::Context::new(handle_scope, Default::default());
             let scope = &mut v8::ContextScope::new(handle_scope, context);
@@ -146,33 +193,145 @@ impl Evaluator {
                 .ok_or_else(|| EvalError::V8Setup("failed to get header object".into()))?;
             let header_obj = v8::Global::new(scope, hdr_obj);
 
-            // Compile script
-            let code = v8::String::new(scope, js_expr)
-                .ok_or_else(|| EvalError::V8Setup("failed to create script string".into()))?;
-
-            let compiled = v8::Script::compile(scope, code, None).ok_or_else(|| {
-                EvalError::CompileError(format!("failed to compile: {}", js_expr))
-            })?;
-            let script = v8::Global::new(scope, compiled);
-
             let context = v8::Global::new(scope, context);
 
-            (context, script, object_template, header_obj)
+            (context, object_template, header_obj)
         };
 
         Ok(Self {
             isolate,
             context,
-            script,
+            scripts: HashMap::new(),
             object_template,
             header_obj,
         })
     }
 
-    /// Evaluate the JS expression on a record and convert the result to type `T`.
+    /// Set the current record for evaluation.
     ///
-    /// Takes ownership of the record. If you need to keep the record, clone
-    /// it before calling this method.
+    /// Takes ownership of the record. The record can later be retrieved with
+    /// [`take`](Self::take). Calling this method again before `take()` will
+    /// drop the previous record.
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The VCF record to evaluate expressions against
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use htsvcf::Evaluator;
+    /// use rust_htslib::bcf::{self, Read};
+    ///
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
+    ///
+    /// for result in reader.records() {
+    ///     let record = result.unwrap();
+    ///     eval.set_record(record);
+    ///     // Now call eval() with expressions...
+    /// }
+    /// ```
+    pub fn set_record(&mut self, record: bcf::Record) {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        // Get locals from globals
+        let object_template = v8::Local::new(scope, &self.object_template);
+        let header_obj = v8::Local::new(scope, &self.header_obj);
+
+        // Create variant from record
+        let variant = Variant::from_record(record);
+
+        // Create variant JS object
+        let variant_object = create_variant_object(scope, object_template, variant, header_obj);
+
+        // Set variant on global
+        let global = context.global(scope);
+        let variant_name = v8::String::new(scope, "variant").unwrap();
+        global.set(scope, variant_name.into(), variant_object.into());
+    }
+
+    /// Compile an expression and cache it, or return the cached version.
+    fn get_or_compile_script(
+        &mut self,
+        js_expr: &str,
+    ) -> Result<v8::Global<v8::Script>, EvalError> {
+        // Check if already cached
+        if let Some(script) = self.scripts.get(js_expr) {
+            return Ok(script.clone());
+        }
+
+        // Check cache limit
+        if self.scripts.len() >= MAX_CACHED_EXPRESSIONS {
+            return Err(EvalError::CacheFull);
+        }
+
+        // Compile and cache
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let code = v8::String::new(scope, js_expr)
+            .ok_or_else(|| EvalError::V8Setup("failed to create script string".into()))?;
+
+        let compiled = v8::Script::compile(scope, code, None)
+            .ok_or_else(|| EvalError::CompileError(format!("failed to compile: {}", js_expr)))?;
+
+        let script = v8::Global::new(scope, compiled);
+        self.scripts.insert(js_expr.to_string(), script.clone());
+
+        Ok(script)
+    }
+
+    /// Check if a record is currently set.
+    fn has_record(&mut self) -> bool {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let global = context.global(scope);
+        let variant_name = match v8::String::new(scope, "variant") {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let variant_val = match global.get(scope, variant_name.into()) {
+            Some(v) => v,
+            None => return false,
+        };
+
+        // Check if it's an object (not undefined)
+        if variant_val.is_undefined() {
+            return false;
+        }
+
+        // Check if the record inside hasn't been taken
+        let Ok(variant_obj) = v8::Local::<v8::Object>::try_from(variant_val) else {
+            return false;
+        };
+
+        let Some(wrapper) =
+            (unsafe { v8::Object::unwrap::<{ crate::variant::TAG }, Variant>(scope, variant_obj) })
+        else {
+            return false;
+        };
+
+        let variant = unsafe { wrapper.as_ref() };
+        variant.has_record(scope)
+    }
+
+    /// Evaluate a JS expression on the current record and convert the result to type `T`.
+    ///
+    /// The expression is compiled on first use and cached for subsequent calls.
+    /// Call [`set_record`](Self::set_record) before calling this method.
     ///
     /// # Type Parameter
     ///
@@ -190,8 +349,10 @@ impl Evaluator {
     ///
     /// # Errors
     ///
-    /// Returns `EvalError::RuntimeError` if the JavaScript execution fails
-    /// or if the result cannot be converted to `T`.
+    /// - `EvalError::NoRecord` - no record set via `set_record()`
+    /// - `EvalError::CacheFull` - expression cache exceeded 8192 entries
+    /// - `EvalError::CompileError` - JavaScript syntax error
+    /// - `EvalError::RuntimeError` - JavaScript runtime error or type conversion failed
     ///
     /// # Examples
     ///
@@ -200,59 +361,32 @@ impl Evaluator {
     /// use rust_htslib::bcf::{self, Read};
     ///
     /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    ///
-    /// // Extract as string
-    /// let mut js_eval = Evaluator::new(reader.header(), "variant.chrom + ':' + variant.pos").unwrap();
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
     /// let record = reader.records().next().unwrap().unwrap();
-    /// let loc: String = js_eval.eval(record).unwrap();
+    /// eval.set_record(record);
     ///
-    /// // Extract as integer
-    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
-    /// let record = reader.records().next().unwrap().unwrap();
-    /// let dp: i32 = js_eval.eval(record).unwrap();
-    ///
-    /// // Filter with boolean
-    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 20").unwrap();
-    /// let record = reader.records().next().unwrap().unwrap();
-    /// let passed: bool = js_eval.eval(record).unwrap();
-    ///
-    /// // Extract array of floats
-    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('AF')").unwrap();
-    /// let record = reader.records().next().unwrap().unwrap();
-    /// let afs: Vec<f64> = js_eval.eval(record).unwrap();
-    ///
-    /// // Handle missing values with Option
-    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('MAYBE_MISSING')").unwrap();
-    /// let record = reader.records().next().unwrap().unwrap();
-    /// let maybe: Option<i32> = js_eval.eval(record).unwrap();
+    /// // Extract as different types
+    /// let loc: String = eval.eval("variant.chrom + ':' + variant.pos").unwrap();
+    /// let dp: i32 = eval.eval("variant.info('DP')").unwrap();
+    /// let passed: bool = eval.eval("variant.info('DP') > 20").unwrap();
+    /// let afs: Vec<f64> = eval.eval("variant.info('AF')").unwrap();
     /// ```
-    pub fn eval<T: FromJsValue>(&mut self, record: bcf::Record) -> Result<T, EvalError> {
+    pub fn eval<T: FromJsValue>(&mut self, js_expr: &str) -> Result<T, EvalError> {
+        // Check if record is set
+        if !self.has_record() {
+            return Err(EvalError::NoRecord);
+        }
+
+        // Get or compile the script
+        let script_global = self.get_or_compile_script(js_expr)?;
+
         let _guard = runtime::v8_lock();
 
         v8::scope!(handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        // Get locals from globals
-        let object_template = v8::Local::new(scope, &self.object_template);
-        let header_obj = v8::Local::new(scope, &self.header_obj);
-        let script = v8::Local::new(scope, &self.script);
-
-        // Create variant from record
-        let variant = Variant::from_record(record);
-
-        // Create variant JS object
-        let variant_object = create_variant_object(scope, object_template, variant, header_obj);
-
-        // Set variant on global
-        let global = context.global(scope);
-        let variant_name = v8::String::new(scope, "variant")
-            .ok_or_else(|| EvalError::V8Setup("failed to create variant string".into()))?;
-        global.set(scope, variant_name.into(), variant_object.into());
+        let script = v8::Local::new(scope, &script_global);
 
         // Run script
         let result = script
@@ -263,10 +397,17 @@ impl Evaluator {
         T::from_js_value(scope, result).map_err(EvalError::RuntimeError)
     }
 
-    /// Evaluate the JS expression and deserialize the result using serde.
+    /// Evaluate a JS expression and deserialize the result using serde.
     ///
     /// Use this for complex types (custom structs, `serde_json::Value`, `HashMap`).
     /// For primitives (`bool`, `i32`, `f64`, `String`, `Vec<T>`), prefer [`Self::eval`].
+    ///
+    /// # Errors
+    ///
+    /// - `EvalError::NoRecord` - no record set via `set_record()`
+    /// - `EvalError::CacheFull` - expression cache exceeded 8192 entries
+    /// - `EvalError::CompileError` - JavaScript syntax error
+    /// - `EvalError::RuntimeError` - JavaScript runtime error or deserialization failed
     ///
     /// # Example
     ///
@@ -283,39 +424,33 @@ impl Evaluator {
     /// }
     ///
     /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(
-    ///     reader.header(),
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
+    /// let record = reader.records().next().unwrap().unwrap();
+    /// eval.set_record(record);
+    ///
+    /// let info: VariantInfo = eval.eval_serde(
     ///     "({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })"
     /// ).unwrap();
-    /// let record = reader.records().next().unwrap().unwrap();
-    /// let info: VariantInfo = js_eval.eval_serde(record).unwrap();
     /// ```
-    pub fn eval_serde<'de, T>(&mut self, record: bcf::Record) -> Result<T, EvalError>
+    pub fn eval_serde<'de, T>(&mut self, js_expr: &str) -> Result<T, EvalError>
     where
         T: serde::Deserialize<'de>,
     {
+        // Check if record is set
+        if !self.has_record() {
+            return Err(EvalError::NoRecord);
+        }
+
+        // Get or compile the script
+        let script_global = self.get_or_compile_script(js_expr)?;
+
         let _guard = runtime::v8_lock();
 
         v8::scope!(handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        // Get locals from globals
-        let object_template = v8::Local::new(scope, &self.object_template);
-        let header_obj = v8::Local::new(scope, &self.header_obj);
-        let script = v8::Local::new(scope, &self.script);
-
-        // Create variant from record
-        let variant = Variant::from_record(record);
-
-        // Create variant JS object
-        let variant_object = create_variant_object(scope, object_template, variant, header_obj);
-
-        // Set variant on global
-        let global = context.global(scope);
-        let variant_name = v8::String::new(scope, "variant")
-            .ok_or_else(|| EvalError::V8Setup("failed to create variant string".into()))?;
-        global.set(scope, variant_name.into(), variant_object.into());
+        let script = v8::Local::new(scope, &script_global);
 
         // Run script
         let result = script
@@ -329,11 +464,11 @@ impl Evaluator {
     /// Take ownership of the bcf::Record from the last evaluated variant.
     ///
     /// Returns `None` if:
-    /// - No record has been evaluated yet
-    /// - `take()` was already called without a subsequent `eval()`
+    /// - No record has been set via `set_record()`
+    /// - `take()` was already called without a subsequent `set_record()`
     ///
-    /// After calling this, accessing variant fields will panic until the next
-    /// `eval()` call creates a new variant.
+    /// After calling this, [`eval`](Self::eval) will return `EvalError::NoRecord`
+    /// until [`set_record`](Self::set_record) is called again.
     ///
     /// # Example
     ///
@@ -342,13 +477,15 @@ impl Evaluator {
     /// use rust_htslib::bcf::{self, Read};
     ///
     /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 10").unwrap();
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
     ///
     /// for result in reader.records() {
     ///     let record = result.unwrap();
-    ///     let passes: bool = js_eval.eval(record).unwrap();
+    ///     eval.set_record(record);
+    ///
+    ///     let passes: bool = eval.eval("variant.info('DP') > 10").unwrap();
     ///     if passes {
-    ///         let record = js_eval.take().unwrap();
+    ///         let record = eval.take().unwrap();
     ///         // write record to output...
     ///     }
     /// }
@@ -405,11 +542,11 @@ mod tests {
     fn test_eval_string() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval =
-            Evaluator::new(reader.header(), "variant.chrom + ':' + variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: String = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: String = js_eval.eval("variant.chrom + ':' + variant.pos").unwrap();
         assert_eq!(result, "chr1:1000");
     }
 
@@ -417,10 +554,11 @@ mod tests {
     fn test_eval_i32() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: i32 = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: i32 = js_eval.eval("variant.info('DP')").unwrap();
         assert_eq!(result, 10);
     }
 
@@ -428,10 +566,11 @@ mod tests {
     fn test_eval_i64() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: i64 = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: i64 = js_eval.eval("variant.pos").unwrap();
         assert_eq!(result, 1000);
     }
 
@@ -439,10 +578,11 @@ mod tests {
     fn test_eval_f64() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') * 1.5").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: f64 = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: f64 = js_eval.eval("variant.info('DP') * 1.5").unwrap();
         assert!((result - 15.0).abs() < 0.001);
     }
 
@@ -450,10 +590,11 @@ mod tests {
     fn test_eval_f32() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') / 3.0").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: f32 = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: f32 = js_eval.eval("variant.info('DP') / 3.0").unwrap();
         assert!((result - 3.333).abs() < 0.01);
     }
 
@@ -461,10 +602,11 @@ mod tests {
     fn test_eval_bool_true() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') >= 10").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: bool = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: bool = js_eval.eval("variant.info('DP') >= 10").unwrap();
         assert!(result);
     }
 
@@ -472,10 +614,11 @@ mod tests {
     fn test_eval_bool_false() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 100").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: bool = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: bool = js_eval.eval("variant.info('DP') > 100").unwrap();
         assert!(!result);
     }
 
@@ -485,37 +628,42 @@ mod tests {
         let mut reader = bcf::Reader::from_path(&path).unwrap();
 
         // Truthy: non-zero number
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(js_eval.eval::<bool>(record).unwrap());
+        js_eval.set_record(record);
+        assert!(js_eval.eval::<bool>("variant.info('DP')").unwrap());
 
         // Falsy: zero
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "0").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(!js_eval.eval::<bool>(record).unwrap());
+        js_eval.set_record(record);
+        assert!(!js_eval.eval::<bool>("0").unwrap());
 
         // Falsy: empty string
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "''").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(!js_eval.eval::<bool>(record).unwrap());
+        js_eval.set_record(record);
+        assert!(!js_eval.eval::<bool>("''").unwrap());
 
         // Falsy: undefined
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('NONEXISTENT')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        assert!(!js_eval.eval::<bool>(record).unwrap());
+        js_eval.set_record(record);
+        assert!(!js_eval.eval::<bool>("variant.info('NONEXISTENT')").unwrap());
     }
 
     #[test]
     fn test_eval_vec_i32() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "[1, 2, 3]").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Vec<i32> = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: Vec<i32> = js_eval.eval("[1, 2, 3]").unwrap();
         assert_eq!(result, vec![1, 2, 3]);
     }
 
@@ -523,10 +671,11 @@ mod tests {
     fn test_eval_vec_f64() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "[0.1, 0.2, 0.7]").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Vec<f64> = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: Vec<f64> = js_eval.eval("[0.1, 0.2, 0.7]").unwrap();
         assert_eq!(result.len(), 3);
         assert!((result[0] - 0.1).abs() < 0.001);
         assert!((result[1] - 0.2).abs() < 0.001);
@@ -537,10 +686,11 @@ mod tests {
     fn test_eval_vec_string() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.alt").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Vec<String> = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: Vec<String> = js_eval.eval("variant.alt").unwrap();
         assert!(!result.is_empty());
     }
 
@@ -548,10 +698,11 @@ mod tests {
     fn test_eval_option_some() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Option<i32> = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: Option<i32> = js_eval.eval("variant.info('DP')").unwrap();
         assert_eq!(result, Some(10));
     }
 
@@ -559,10 +710,11 @@ mod tests {
     fn test_eval_option_none() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('NONEXISTENT')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Option<i32> = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: Option<i32> = js_eval.eval("variant.info('NONEXISTENT')").unwrap();
         assert_eq!(result, None);
     }
 
@@ -570,10 +722,11 @@ mod tests {
     fn test_eval_option_null() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "null").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Option<String> = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+        let result: Option<String> = js_eval.eval("null").unwrap();
         assert_eq!(result, None);
     }
 
@@ -581,10 +734,11 @@ mod tests {
     fn test_eval_type_mismatch_int() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "'hello'").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Result<i32, EvalError> = js_eval.eval(record);
+        js_eval.set_record(record);
+        let result: Result<i32, EvalError> = js_eval.eval("'hello'");
         assert!(result.is_err());
         match result {
             Err(EvalError::RuntimeError(msg)) => {
@@ -599,10 +753,11 @@ mod tests {
     fn test_eval_type_mismatch_array() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "42").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Result<Vec<i32>, EvalError> = js_eval.eval(record);
+        js_eval.set_record(record);
+        let result: Result<Vec<i32>, EvalError> = js_eval.eval("42");
         assert!(result.is_err());
         match result {
             Err(EvalError::RuntimeError(msg)) => {
@@ -617,15 +772,14 @@ mod tests {
     fn test_eval_type_mismatch_truncates_long_value() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        // Create a long string that should be truncated in error message
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "'this is a very long string that should be truncated in the error message to avoid excessive output'",
-        )
-        .unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Result<i32, EvalError> = js_eval.eval(record);
+        js_eval.set_record(record);
+        // Create a long string that should be truncated in error message
+        let result: Result<i32, EvalError> = js_eval.eval(
+            "'this is a very long string that should be truncated in the error message to avoid excessive output'",
+        );
         assert!(result.is_err());
         match result {
             Err(EvalError::RuntimeError(msg)) => {
@@ -637,15 +791,41 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_evals() {
+    fn test_multiple_evals_same_record() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        // Multiple expressions against the same record
+        let dp: i32 = js_eval.eval("variant.info('DP')").unwrap();
+        let pos: i64 = js_eval.eval("variant.pos").unwrap();
+        let passes: bool = js_eval.eval("variant.info('DP') > 5").unwrap();
+        let loc: String = js_eval.eval("variant.chrom + ':' + variant.pos").unwrap();
+
+        assert_eq!(dp, 10);
+        assert_eq!(pos, 1000);
+        assert!(passes);
+        assert_eq!(loc, "chr1:1000");
+
+        // Can still take the record after multiple evals
+        let record = js_eval.take().unwrap();
+        assert_eq!(record.pos() + 1, 1000);
+    }
+
+    #[test]
+    fn test_multiple_records() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let mut positions = Vec::new();
         for result in reader.records() {
             let record = result.unwrap();
-            let pos: i64 = js_eval.eval(record).unwrap();
+            js_eval.set_record(record);
+            let pos: i64 = js_eval.eval("variant.pos").unwrap();
             positions.push(pos);
         }
 
@@ -654,11 +834,34 @@ mod tests {
     }
 
     #[test]
+    fn test_expression_caching() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Eval the same expression multiple times across records
+        let expr = "variant.pos";
+        for result in reader.records().take(10) {
+            let record = result.unwrap();
+            js_eval.set_record(record);
+            let _: i64 = js_eval.eval(expr).unwrap();
+        }
+
+        // Should only have one cached script
+        assert_eq!(js_eval.scripts.len(), 1);
+    }
+
+    #[test]
     fn test_compile_error() {
         let path = fixture_vcf();
-        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
-        let result = Evaluator::new(reader.header(), "this is not valid javascript {{{{");
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let result: Result<String, EvalError> =
+            js_eval.eval("this is not valid javascript {{{{");
         assert!(result.is_err());
         match result {
             Err(EvalError::CompileError(_)) => {}
@@ -670,16 +873,89 @@ mod tests {
     fn test_runtime_error() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval =
-            Evaluator::new(reader.header(), "throw new Error('test error')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: Result<String, EvalError> = js_eval.eval(record);
+        js_eval.set_record(record);
+
+        let result: Result<String, EvalError> = js_eval.eval("throw new Error('test error')");
         assert!(result.is_err());
         match result {
             Err(EvalError::RuntimeError(_)) => {}
             _ => panic!("expected RuntimeError"),
         }
+    }
+
+    #[test]
+    fn test_no_record_error() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Eval without setting a record
+        let result: Result<i64, EvalError> = js_eval.eval("variant.pos");
+        assert!(matches!(result, Err(EvalError::NoRecord)));
+    }
+
+    #[test]
+    fn test_no_record_error_after_take() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let _: i64 = js_eval.eval("variant.pos").unwrap();
+        let _ = js_eval.take().unwrap();
+
+        // Eval after take should error
+        let result: Result<i64, EvalError> = js_eval.eval("variant.pos");
+        assert!(matches!(result, Err(EvalError::NoRecord)));
+    }
+
+    #[test]
+    fn test_set_record_overwrites_previous() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let mut records = reader.records();
+        let record1 = records.next().unwrap().unwrap();
+        let record2 = records.next().unwrap().unwrap();
+
+        js_eval.set_record(record1);
+        let pos1: i64 = js_eval.eval("variant.pos").unwrap();
+
+        // Set another record without taking the first
+        js_eval.set_record(record2);
+        let pos2: i64 = js_eval.eval("variant.pos").unwrap();
+
+        // Should have different positions
+        assert_ne!(pos1, pos2);
+    }
+
+    #[test]
+    fn test_cache_full_error() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        // Fill the cache with unique expressions
+        for i in 0..MAX_CACHED_EXPRESSIONS {
+            let expr = format!("variant.pos + {}", i);
+            let _: i64 = js_eval.eval(&expr).unwrap();
+        }
+
+        assert_eq!(js_eval.scripts.len(), MAX_CACHED_EXPRESSIONS);
+
+        // Next unique expression should fail
+        let result: Result<i64, EvalError> =
+            js_eval.eval("variant.pos + 999999");
+        assert!(matches!(result, Err(EvalError::CacheFull)));
     }
 
     #[test]
@@ -698,12 +974,13 @@ mod tests {
         fs::write(&path, vcf).unwrap();
 
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let mut count = 0;
         for result in reader.records() {
             let record = result.unwrap();
-            let _: i32 = js_eval.eval(record).unwrap();
+            js_eval.set_record(record);
+            let _: i32 = js_eval.eval("variant.info('DP')").unwrap();
             count += 1;
         }
 
@@ -715,15 +992,14 @@ mod tests {
     fn test_eval_serde_json_hashmap() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "({ a: 1, b: [true, false], c: { d: 'foo' }, e: null })",
-        )
-        .unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: std::collections::HashMap<String, serde_json::Value> =
-            js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+
+        let result: std::collections::HashMap<String, serde_json::Value> = js_eval
+            .eval_serde("({ a: 1, b: [true, false], c: { d: 'foo' }, e: null })")
+            .unwrap();
 
         use serde_json::json;
         // serde_v8 preserves integer types, so use as_i64() for integer comparisons
@@ -739,10 +1015,15 @@ mod tests {
 
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
         // Create a JavaScript object with nested structure
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "({ 
+        let result: std::collections::HashMap<String, serde_json::Value> = js_eval
+            .eval_serde(
+                "({ 
                 a: 42, 
                 b: 'hello', 
                 c: [1, 2, 3], 
@@ -750,12 +1031,8 @@ mod tests {
                 e: null,
                 f: variant.info('DP') // Access actual VCF data
             })",
-        )
-        .unwrap();
-
-        let record = reader.records().next().unwrap().unwrap();
-        let result: std::collections::HashMap<String, serde_json::Value> =
-            js_eval.eval_serde(record).unwrap();
+            )
+            .unwrap();
 
         // Test accessing numeric value - serde_v8 preserves integer types
         assert_eq!(result["a"].as_i64().unwrap(), 42);
@@ -799,14 +1076,14 @@ mod tests {
 
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })",
-        )
-        .unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: VariantInfo = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+
+        let result: VariantInfo = js_eval
+            .eval_serde("({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })")
+            .unwrap();
 
         assert_eq!(result.chrom, "chr1");
         assert_eq!(result.pos, 1000);
@@ -817,14 +1094,14 @@ mod tests {
     fn test_eval_serde_json_value() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "({ pos: variant.pos, alt: variant.alt })",
-        )
-        .unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: serde_json::Value = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+
+        let result: serde_json::Value = js_eval
+            .eval_serde("({ pos: variant.pos, alt: variant.alt })")
+            .unwrap();
 
         assert!(result.is_object());
         assert_eq!(result["pos"].as_i64().unwrap(), 1000);
@@ -837,30 +1114,34 @@ mod tests {
 
         // Test i32
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        let result: i32 = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+        let result: i32 = js_eval.eval_serde("variant.info('DP')").unwrap();
         assert_eq!(result, 10);
 
         // Test String
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.chrom").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        let result: String = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+        let result: String = js_eval.eval_serde("variant.chrom").unwrap();
         assert_eq!(result, "chr1");
 
         // Test bool
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 5").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        let result: bool = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+        let result: bool = js_eval.eval_serde("variant.info('DP') > 5").unwrap();
         assert!(result);
 
         // Test Vec
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "[1, 2, 3]").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
         let record = reader.records().next().unwrap().unwrap();
-        let result: Vec<i32> = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+        let result: Vec<i32> = js_eval.eval_serde("[1, 2, 3]").unwrap();
         assert_eq!(result, vec![1, 2, 3]);
     }
 
@@ -876,24 +1157,34 @@ mod tests {
 
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(
-            reader.header(),
-            "({ depth: variant.info('DP'), missing: variant.info('NONEXISTENT') })",
-        )
-        .unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: MaybeInfo = js_eval.eval_serde(record).unwrap();
+        js_eval.set_record(record);
+
+        let result: MaybeInfo = js_eval
+            .eval_serde("({ depth: variant.info('DP'), missing: variant.info('NONEXISTENT') })")
+            .unwrap();
 
         assert_eq!(result.depth, Some(10));
         assert_eq!(result.missing, None);
     }
 
     #[test]
-    fn test_take_returns_none_before_eval() {
+    fn test_eval_serde_no_record_error() {
         let path = fixture_vcf();
         let reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let result: Result<i32, EvalError> = js_eval.eval_serde("variant.pos");
+        assert!(matches!(result, Err(EvalError::NoRecord)));
+    }
+
+    #[test]
+    fn test_take_returns_none_before_set_record() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         assert!(js_eval.take().is_none());
     }
@@ -902,10 +1193,12 @@ mod tests {
     fn test_take_returns_record_after_eval() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let pos: i64 = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+
+        let pos: i64 = js_eval.eval("variant.pos").unwrap();
         assert_eq!(pos, 1000);
 
         let taken = js_eval.take();
@@ -919,35 +1212,38 @@ mod tests {
     fn test_take_returns_none_after_second_call() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let _: i64 = js_eval.eval(record).unwrap();
+        js_eval.set_record(record);
+
+        let _: i64 = js_eval.eval("variant.pos").unwrap();
 
         assert!(js_eval.take().is_some());
         assert!(js_eval.take().is_none());
     }
 
     #[test]
-    fn test_take_works_across_multiple_evals() {
+    fn test_take_works_across_multiple_set_records() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
-        let mut js_eval = Evaluator::new(reader.header(), "variant.pos").unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         let mut records = reader.records();
 
         // First record
         let record1 = records.next().unwrap().unwrap();
-        let _: i64 = js_eval.eval(record1).unwrap();
+        js_eval.set_record(record1);
+        let _: i64 = js_eval.eval("variant.pos").unwrap();
         let taken1 = js_eval.take().unwrap();
 
         // Second record
         let record2 = records.next().unwrap().unwrap();
-        let _: i64 = js_eval.eval(record2).unwrap();
+        js_eval.set_record(record2);
+        let _: i64 = js_eval.eval("variant.pos").unwrap();
         let taken2 = js_eval.take().unwrap();
 
         // Verify they're different records (different positions)
         assert_ne!(taken1.pos(), taken2.pos());
     }
 }
-

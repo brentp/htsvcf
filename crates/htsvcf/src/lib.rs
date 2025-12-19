@@ -33,16 +33,16 @@
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-//!     let mut dp_eval = Evaluator::new(reader.header(), "variant.info('DP')")?;
-//!     let mut af_eval = Evaluator::new(reader.header(), "variant.info('AF')")?;
+//!     let mut eval = Evaluator::new(reader.header())?;
 //!
 //!     for result in reader.records() {
 //!         let record = result?;
-//!         let dp: i32 = dp_eval.eval(record)?;
-//!         // we need to get ownership of the record again to pass to the other evalutor
-            // (or to write the variant)
-//!         let record = dp_eval.take().unwrap();
-//!         let af: Vec<f32> = af_eval.eval(record)?;
+//!         eval.set_record(record);
+//!         
+//!         // Multiple expressions can be evaluated against the same record
+//!         // Each expression is compiled once and cached
+//!         let dp: i32 = eval.eval("variant.info('DP')")?;
+//!         let af: Vec<f32> = eval.eval("variant.info('AF')")?;
 //!         println!("DP = {}, AF = {:?}", dp, af);
 //!     }
 //!     Ok(())

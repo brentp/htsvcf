@@ -17,12 +17,13 @@
 //! use rust_htslib::bcf::{self, Read};
 //!
 //! let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-//! let mut eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+//! let mut eval = Evaluator::new(reader.header()).unwrap();
 //!
 //! for result in reader.records() {
 //!     let record = result.unwrap();
+//!     eval.set_record(record);
 //!     // Extract as i32 using FromJsValue
-//!     let dp: i32 = eval.eval(record).unwrap();
+//!     let dp: i32 = eval.eval("variant.info('DP')").unwrap();
 //!     println!("DP = {}", dp);
 //! }
 //! ```
@@ -64,11 +65,12 @@ pub(crate) fn truncate_for_error(s: &str) -> String {
 /// use rust_htslib::bcf::{self, Read};
 ///
 /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-/// let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+/// let mut eval = Evaluator::new(reader.header()).unwrap();
 ///
 /// for result in reader.records() {
 ///     let record = result.unwrap();
-///     let dp: i32 = js_eval.eval(record).unwrap();
+///     eval.set_record(record);
+///     let dp: i32 = eval.eval("variant.info('DP')").unwrap();
 ///     println!("DP = {}", dp);
 /// }
 /// ```

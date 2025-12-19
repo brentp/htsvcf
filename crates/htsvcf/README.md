@@ -39,11 +39,12 @@ use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-    let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')")?;
+    let mut eval = Evaluator::new(reader.header())?;
 
     for result in reader.records() {
         let record = result?;
-        let dp: i32 = js_eval.eval(record)?;
+        eval.set_record(record);
+        let dp: i32 = eval.eval("variant.info('DP')")?;
         println!("DP = {}", dp);
     }
     Ok(())
@@ -51,6 +52,46 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```
 
 ### Evaluator API
+
+#### Expression Caching
+
+Expressions are compiled to JavaScript on first use and cached by their exact
+string value. Subsequent calls with the same expression string reuse the compiled
+script. The cache holds up to 8192 unique expressions; attempting to add more
+returns `EvalError::CacheFull`.
+
+For best performance, reuse the same expression strings across records rather
+than generating dynamic expression strings per-record.
+
+#### Multiple Expressions
+
+You can evaluate multiple different expressions against the same record:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut eval = Evaluator::new(reader.header())?;
+
+    for result in reader.records() {
+        let record = result?;
+        eval.set_record(record);
+
+        // Multiple expressions, all evaluated against the same record
+        let dp: i32 = eval.eval("variant.info('DP')")?;
+        let passes: bool = eval.eval("variant.info('DP') > 20")?;
+        let loc: String = eval.eval("variant.chrom + ':' + variant.pos")?;
+
+        if passes {
+            let record = eval.take().unwrap();
+            // write record...
+        }
+    }
+    Ok(())
+}
+```
 
 #### Supported Types
 
@@ -75,11 +116,12 @@ struct VariantSummary {
     depth: Option<i32>,
 }
 
-let mut js_eval = Evaluator::new(
-    reader.header(),
+let mut eval = Evaluator::new(reader.header())?;
+let record = reader.records().next().unwrap()?;
+eval.set_record(record);
+let summary: VariantSummary = eval.eval_serde(
     "({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })"
 )?;
-let summary: VariantSummary = js_eval.eval_serde(record)?;
 ```
 
 #### Filtering
@@ -95,16 +137,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let header = bcf::Header::from_template(reader.header());
     let mut writer = bcf::Writer::from_path("output.vcf.gz", &header, true, bcf::Format::Vcf)?;
     
-    let mut js_eval = Evaluator::new(
-        reader.header(),
-        "variant.info('DP') > 20 && variant.qual > 30"
-    )?;
+    let mut eval = Evaluator::new(reader.header())?;
 
     for result in reader.records() {
         let record = result?;
-        if js_eval.eval::<bool>(record)? {
+        eval.set_record(record);
+        if eval.eval::<bool>("variant.info('DP') > 20 && variant.qual > 30")? {
             // Use take() to get ownership of the record for writing
-            let record = js_eval.take().unwrap();
+            let record = eval.take().unwrap();
             writer.write(&record)?;
         }
     }
@@ -122,18 +162,16 @@ use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-    let mut js_eval = Evaluator::new(
-        reader.header(),
-        "variant.info('DP') > 10"
-    )?;
+    let mut eval = Evaluator::new(reader.header())?;
 
     for result in reader.records() {
         let record = result?;
-        let passes: bool = js_eval.eval(record)?;
+        eval.set_record(record);
+        let passes: bool = eval.eval("variant.info('DP') > 10")?;
         if passes {
             // take() returns Option<bcf::Record>
-            // Returns None if called before eval() or called twice without eval()
-            let record = js_eval.take().unwrap();
+            // Returns None if called before set_record() or called twice without set_record()
+            let record = eval.take().unwrap();
             // Use the record (write to file, collect, etc.)
         }
     }
@@ -149,17 +187,19 @@ use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut eval = Evaluator::new(reader.header())?;
 
     // Extract array of allele frequencies
-    let mut js_eval = Evaluator::new(reader.header(), "variant.info('AF')")?;
     let record = reader.records().next().unwrap()?;
-    let afs: Vec<f64> = js_eval.eval(record)?;
+    eval.set_record(record);
+    let afs: Vec<f64> = eval.eval("variant.info('AF')")?;
 
     // Handle potentially missing values
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-    let mut js_eval = Evaluator::new(reader.header(), "variant.info('MAYBE_MISSING')")?;
+    let mut eval = Evaluator::new(reader.header())?;
     let record = reader.records().next().unwrap()?;
-    let maybe: Option<i32> = js_eval.eval(record)?;
+    eval.set_record(record);
+    let maybe: Option<i32> = eval.eval("variant.info('MAYBE_MISSING')")?;
     
     Ok(())
 }
@@ -175,17 +215,18 @@ use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-    let mut js_eval = Evaluator::new(
-        reader.header(),
-        r#"
+    let mut eval = Evaluator::new(reader.header())?;
+
+    let expr = r#"
         const gt = variant.format('GT');
         const het_count = gt.filter(g => g && g[0] !== g[1]).length;
         het_count > 0
-        "#
-    )?;
+    "#;
 
     for result in reader.records() {
-        if js_eval.eval::<bool>(result?)? {
+        let record = result?;
+        eval.set_record(record);
+        if eval.eval::<bool>(expr)? {
             println!("Variant has heterozygous samples");
         }
     }
