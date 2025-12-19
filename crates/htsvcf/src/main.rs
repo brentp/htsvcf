@@ -1,27 +1,29 @@
 use std::io::{BufWriter, Write};
 
+use argh::FromArgs;
 use htsvcf::Evaluator;
 use rust_htslib::bcf::{self, Read};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
-/// CLI entrypoint.
-///
-/// Usage: `htsvcf <input.vcf|input.bcf> [js_expr]`.
+/// Evaluate JavaScript expressions on VCF/BCF records.
+#[derive(FromArgs)]
+#[argh(help_triggers("-h", "--help", ""))]
+struct Args {
+    /// input VCF or BCF file
+    #[argh(positional)]
+    input: String,
+
+    /// javaScript expression to evaluate (default: "variant.start")
+    #[argh(positional, default = "String::from(\"variant.start\")")]
+    js_expr: String,
+}
+
 fn main() -> Result<(), AnyError> {
-    let mut args = std::env::args();
-    let program = args.next().unwrap_or_else(|| "htsvcf".to_string());
+    let args: Args = argh::from_env();
 
-    let Some(path) = args.next() else {
-        eprintln!("usage: {program} <input.vcf|input.bcf> [js_expr]");
-        eprintln!("example: {program} input.vcf.gz 'variant.chrom + \":\" + variant.start'");
-        return Ok(());
-    };
-
-    let js_expr = args.next().unwrap_or_else(|| "variant.start".to_string());
-
-    let mut reader = bcf::Reader::from_path(&path)?;
-    let mut evaluator = Evaluator::new(reader.header(), &js_expr)?;
+    let mut reader = bcf::Reader::from_path(&args.input)?;
+    let mut evaluator = Evaluator::new(reader.header(), &args.js_expr)?;
 
     let stdout = std::io::stdout().lock();
     let mut writer = BufWriter::new(stdout);

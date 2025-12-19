@@ -18,3 +18,4 @@ htsvcf-core = { path = "../htsvcf-core" }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_v8.workspace = true
+argh = {version = "0.1.13", features = ["help"]}
