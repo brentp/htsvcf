@@ -108,7 +108,7 @@ const HEADER_INTERNAL_FIELD_INDEX: usize = 1;
 /// A single VCF/BCF record exposed to JavaScript.
 ///
 /// The embedded `bcf::Record` is kept alive for the duration of evaluation of a
-/// single iteration in [`runner::run_vcf_expr_with`].
+/// single iteration in [`crate::runner::run_vcf_expr_with`].
 #[derive(Debug)]
 pub struct Variant {
     record: v8::cppgc::GcCell<Option<bcf::Record>>,

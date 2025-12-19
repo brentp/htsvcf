@@ -55,7 +55,7 @@ pub(crate) fn truncate_for_error(s: &str) -> String {
 /// - `Option<T>` - returns `None` for `null`/`undefined`, otherwise `Some(T)`
 ///
 /// For complex types like `serde_json::Value`, `HashMap<String, T>`, or custom
-/// structs with `#[derive(Deserialize)]`, use [`Evaluator::eval_serde`] instead.
+/// structs with `#[derive(Deserialize)]`, use [`crate::Evaluator::eval_serde`] instead.
 ///
 /// # Example
 ///

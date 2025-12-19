@@ -186,7 +186,7 @@ impl Evaluator {
     /// - `Option<T>` - returns `None` for `null`/`undefined`
     ///
     /// For complex types like `serde_json::Value`, `HashMap<String, T>`, or custom
-    /// structs with `#[derive(Deserialize)]`, use [`eval_serde`] instead.
+    /// structs with `#[derive(Deserialize)]`, use [`Self::eval_serde`] instead.
     ///
     /// # Errors
     ///
@@ -266,7 +266,7 @@ impl Evaluator {
     /// Evaluate the JS expression and deserialize the result using serde.
     ///
     /// Use this for complex types (custom structs, `serde_json::Value`, `HashMap`).
-    /// For primitives (`bool`, `i32`, `f64`, `String`, `Vec<T>`), prefer [`eval`].
+    /// For primitives (`bool`, `i32`, `f64`, `String`, `Vec<T>`), prefer [`Self::eval`].
     ///
     /// # Example
     ///
