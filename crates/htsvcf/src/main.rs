@@ -1,3 +1,8 @@
+use std::io::{BufWriter, Write};
+
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
 /// CLI entrypoint.
@@ -14,5 +19,21 @@ fn main() -> Result<(), AnyError> {
     };
 
     let js_expr = args.next().unwrap_or_else(|| "variant.start".to_string());
-    htsvcf::runner::run_vcf_expr_to_stdout(&path, &js_expr, Default::default())
+
+    let mut reader = bcf::Reader::from_path(&path)?;
+    let mut evaluator = Evaluator::new(reader.header(), &js_expr)?;
+
+    let stdout = std::io::stdout().lock();
+    let mut writer = BufWriter::new(stdout);
+
+    let mut record = reader.empty_record();
+    while let Some(result) = reader.read(&mut record) {
+        result?;
+        let output: String = evaluator.eval(record)?;
+        writeln!(writer, "{:}", output)?;
+        record = reader.empty_record();
+    }
+
+    writer.flush()?;
+    Ok(())
 }

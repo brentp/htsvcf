@@ -7,6 +7,10 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = []
+static = ["htsvcf-core/static", "rust-htslib/static"]
+
 [dependencies]
 htsvcf-core = { path = "../htsvcf-core" }
 napi = { version = "3", default-features = false, features = ["napi8", "compat-mode"] }

@@ -7,6 +7,10 @@ license.workspace = true
 [[bin]]
 name = "htsvcf"
 
+[features]
+default = []
+static = ["htsvcf-core/static", "rust-htslib/static"]
+
 [dependencies]
 v8.workspace = true
 rust-htslib.workspace = true

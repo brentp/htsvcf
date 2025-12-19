@@ -4,5 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+static = ["rust-htslib/static"]
+
 [dependencies]
 rust-htslib.workspace = true

@@ -330,6 +330,14 @@ variant.toString()           // "chr1\t1000\t.\tA\tC\t30\tPASS\tDP=10\t..."
   serialize access for safety.
 - This is currently oriented around evaluating an expression per record.
 
+## Building a Static Binary
+
+To build a fully static binary (no dynamic library dependencies):
+
+```bash
+cargo rustc -p htsvcf --release --features static --bin htsvcf -- -C target-feature=+crt-static
+```
+
 ## Testing
 
 Run tests with:
