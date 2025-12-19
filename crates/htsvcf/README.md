@@ -205,9 +205,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-#### Custom Functions with `add_script()`
+#### Custom Functions with `run()`
 
-Use `add_script()` to define reusable JavaScript functions that can be called from expressions:
+Use `run()` to define reusable JavaScript functions that can be called from expressions:
 
 ```rust
 use htsvcf::Evaluator;
@@ -218,14 +218,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut eval = Evaluator::new(reader.header())?;
 
     // Define custom filter functions
-    eval.add_script("function passes(v) { return v.info('DP') > 10 && v.qual > 20 }")?;
-    eval.add_script("function isRare(v) { 
+    eval.run("function passes(v) { return v.info('DP') > 10 && v.qual > 20 }")?;
+    eval.run("function isRare(v) { 
         const af = v.info('AF');
         return af && af[0] < 0.01;
     }")?;
 
     // Define constants
-    eval.add_script("const MIN_DP = 5")?;
+    eval.run("const MIN_DP = 5")?;
 
     for result in reader.records() {
         let record = result?;

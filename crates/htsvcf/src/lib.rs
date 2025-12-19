@@ -35,8 +35,8 @@
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
 //!     let mut eval = Evaluator::new(reader.header())?;
 //!
-//!     // Define reusable functions with add_script()
-//!     eval.add_script("function passes(v) { return v.info('DP') > 10 }")?;
+    //!     // Define reusable functions with run()
+    //!     eval.run("function passes(v) { return v.info('DP') > 10 }")?;
 //!
 //!     for result in reader.records() {
 //!         let record = result?;

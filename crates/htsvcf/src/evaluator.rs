@@ -501,7 +501,7 @@ impl Evaluator {
     /// let mut eval = Evaluator::new(reader.header()).unwrap();
     ///
     /// // Define a custom filter function
-    /// eval.add_script("function passes(v) { return v.info('DP') > 10 }").unwrap();
+    /// eval.run("function passes(v) { return v.info('DP') > 10 }").unwrap();
     ///
     /// for result in reader.records() {
     ///     let record = result.unwrap();
@@ -515,7 +515,7 @@ impl Evaluator {
     ///     }
     /// }
     /// ```
-    pub fn add_script(&mut self, script: &str) -> Result<(), EvalError> {
+    pub fn run(&mut self, script: &str) -> Result<(), EvalError> {
         let _guard = runtime::v8_lock();
 
         v8::scope!(handle_scope, &mut self.isolate);
@@ -1339,14 +1339,14 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_simple_function() {
+    fn test_run_simple_function() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add a simple function
         js_eval
-            .add_script("function double(x) { return x * 2 }")
+            .run("function double(x) { return x * 2 }")
             .unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
@@ -1357,14 +1357,14 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_filter_function() {
+    fn test_run_filter_function() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add a filter function that uses the variant
         js_eval
-            .add_script("function passes(v) { return v.info('DP') > 5 }")
+            .run("function passes(v) { return v.info('DP') > 5 }")
             .unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
@@ -1376,21 +1376,21 @@ mod tests {
 
         // Test with a threshold that should fail
         js_eval
-            .add_script("function highDepth(v) { return v.info('DP') > 100 }")
+            .run("function highDepth(v) { return v.info('DP') > 100 }")
             .unwrap();
         let result: bool = js_eval.eval("highDepth(variant)").unwrap();
         assert!(!result);
     }
 
     #[test]
-    fn test_add_script_multiple_functions() {
+    fn test_run_multiple_functions() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add multiple functions in one script
         js_eval
-            .add_script(
+            .run(
                 r#"
                 function getLocation(v) { return v.chrom + ':' + v.pos }
                 function hasHighDP(v) { return v.info('DP') >= 10 }
@@ -1414,14 +1414,14 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_before_set_record() {
+    fn test_run_before_set_record() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add script before setting any record (should work)
         js_eval
-            .add_script("function add(a, b) { return a + b }")
+            .run("function add(a, b) { return a + b }")
             .unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
@@ -1432,12 +1432,12 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_compile_error() {
+    fn test_run_compile_error() {
         let path = fixture_vcf();
         let reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
-        let result = js_eval.add_script("function invalid syntax {{{{");
+        let result = js_eval.run("function invalid syntax {{{{");
         assert!(result.is_err());
         match result {
             Err(EvalError::CompileError(msg)) => {
@@ -1453,12 +1453,12 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_runtime_error() {
+    fn test_run_runtime_error() {
         let path = fixture_vcf();
         let reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
-        let result = js_eval.add_script("throw new Error('intentional error')");
+        let result = js_eval.run("throw new Error('intentional error')");
         assert!(result.is_err());
         match result {
             Err(EvalError::RuntimeError(_)) => {}
@@ -1467,13 +1467,13 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_persists_across_records() {
+    fn test_run_persists_across_records() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         js_eval
-            .add_script("function getPos(v) { return v.pos }")
+            .run("function getPos(v) { return v.pos }")
             .unwrap();
 
         let mut positions = Vec::new();
@@ -1489,15 +1489,15 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_with_global_variables() {
+    fn test_run_with_global_variables() {
         let path = fixture_vcf();
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add global variables and use them in functions
-        js_eval.add_script("let counter = 0").unwrap();
+        js_eval.run("let counter = 0").unwrap();
         js_eval
-            .add_script("function incrementCounter() { return ++counter }")
+            .run("function incrementCounter() { return ++counter }")
             .unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
@@ -1513,14 +1513,14 @@ mod tests {
     }
 
     #[test]
-    fn test_add_script_can_access_header() {
+    fn test_run_can_access_header() {
         let path = fixture_vcf();
         let reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // The header global should be accessible from added scripts
         js_eval
-            .add_script("function getSampleCount() { return header.samples.length }")
+            .run("function getSampleCount() { return header.samples.length }")
             .unwrap();
 
         // No record needed - just accessing header
