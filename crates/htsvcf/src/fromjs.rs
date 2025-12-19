@@ -1,3 +1,35 @@
+//! Trait and implementations for extracting Rust types from V8 JavaScript values.
+//!
+//! This module provides the [`FromJsValue`] trait, which allows converting V8 values
+//! returned by JavaScript expressions into strongly-typed Rust values. The trait is
+//! used by [`Evaluator::eval`](crate::Evaluator::eval) to convert expression results.
+//!
+//! # Built-in Implementations
+//!
+//! - **Primitives**: `String`, `bool`, `i32`, `i64`, `f32`, `f64`
+//! - **Collections**: `Vec<T>` for JavaScript arrays
+//! - **Optional**: `Option<T>` returns `None` for `null`/`undefined`
+//!
+//! # Example
+//!
+//! ```no_run
+//! use htsvcf::{Evaluator, FromJsValue};
+//! use rust_htslib::bcf::{self, Read};
+//!
+//! let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+//! let mut eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+//!
+//! for result in reader.records() {
+//!     let record = result.unwrap();
+//!     // Extract as i32 using FromJsValue
+//!     let dp: i32 = eval.eval(record).unwrap();
+//!     println!("DP = {}", dp);
+//! }
+//! ```
+//!
+//! For complex types like `serde_json::Value` or custom structs, use
+//! [`Evaluator::eval_serde`](crate::Evaluator::eval_serde) instead.
+
 use v8;
 
 /// Helper to truncate a string for error messages (max 50 chars).

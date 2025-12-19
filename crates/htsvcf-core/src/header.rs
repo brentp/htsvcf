@@ -1,3 +1,38 @@
+//! VCF/BCF header representation and manipulation.
+//!
+//! This module provides the [`Header`] struct, which wraps an htslib `bcf_hdr_t`
+//! pointer and provides safe access to header metadata including sample names,
+//! INFO/FORMAT field definitions, and header modification.
+//!
+//! # Ownership
+//!
+//! [`Header`] owns its underlying `bcf_hdr_t*` via duplication. This ensures
+//! correct lifetime management and thread safety - the header can outlive the
+//! reader it was created from.
+//!
+//! # Caching
+//!
+//! Sample names and tag ID-to-name mappings are cached at construction time
+//! for O(1) lookups during variant processing.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use htsvcf_core::header::Header;
+//! use rust_htslib::bcf::{self, Read};
+//!
+//! let reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+//! let header = unsafe { Header::new(reader.header().inner) };
+//!
+//! // Access sample information
+//! println!("Samples: {:?}", header.sample_names());
+//!
+//! // Look up INFO field type
+//! if let Some((ty, len)) = header.info_type(b"DP") {
+//!     println!("DP is {:?} with length {:?}", ty, len);
+//! }
+//! ```
+
 use rust_htslib::bcf;
 use rust_htslib::bcf::header::{HeaderRecord, TagLength, TagType};
 use std::collections::HashMap;
@@ -13,6 +48,16 @@ impl Drop for Header {
   }
 }
 
+/// A VCF/BCF header with metadata and sample information.
+///
+/// `Header` owns its underlying `bcf_hdr_t*` via duplication. It provides
+/// access to sample names, INFO/FORMAT field definitions, and supports
+/// header modification (adding INFO/FORMAT fields).
+///
+/// # Caching
+///
+/// Sample names and tag ID-to-name mappings are cached at construction time
+/// for O(1) lookups during variant processing.
 #[derive(Debug)]
 pub struct Header {
   inner: *mut rust_htslib::htslib::bcf_hdr_t,
@@ -26,11 +71,16 @@ pub struct Header {
   id_to_name_cache: HashMap<u32, (String, Vec<u8>)>,
 }
 
+/// Represents a field definition from the VCF header (INFO, FORMAT, or FILTER).
 #[derive(Debug, Clone)]
 pub struct HeaderField {
+  /// The field ID (e.g., "DP", "GQ").
   pub id: String,
+  /// The field type ("Integer", "Float", "String", "Flag").
   pub r#type: String,
+  /// The Number field ("1", "A", "R", "G", ".").
   pub number: String,
+  /// The description from the header.
   pub description: String,
 }
 
@@ -93,6 +143,7 @@ impl Header {
     }
   }
 
+  /// Create an empty header (for writing new VCFs).
   pub fn empty() -> Self {
     let c_str = CString::new(&b"w"[..]).unwrap();
     let inner = unsafe { rust_htslib::htslib::bcf_hdr_init(c_str.as_ptr()) };
@@ -105,18 +156,28 @@ impl Header {
     }
   }
 
+  /// Get the raw `bcf_hdr_t` pointer.
+  ///
+  /// # Safety
+  ///
+  /// The returned pointer is valid for the lifetime of this `Header`.
   pub fn inner_ptr(&self) -> *mut rust_htslib::htslib::bcf_hdr_t {
     self.inner
   }
 
+  /// Get a temporary header view (internal use).
   fn view(&self) -> ManuallyDrop<bcf::header::HeaderView> {
     ManuallyDrop::new(bcf::header::HeaderView::new(self.inner))
   }
 
+  /// Get all header records (INFO, FORMAT, FILTER, contig, etc.).
   pub fn header_records(&self) -> Vec<HeaderRecord> {
     self.view().header_records()
   }
 
+  /// Get the sample index for a sample name.
+  ///
+  /// Returns `None` if the sample is not found.
   pub fn sample_id(&self, sample: &[u8]) -> Option<usize> {
     match self.view().sample_to_id(sample) {
       Ok(id) => Some(id.0 as usize),
@@ -124,12 +185,18 @@ impl Header {
     }
   }
 
+  /// Get the tag name for a numeric ID (INFO/FORMAT).
+  ///
+  /// This performs a fresh lookup; prefer [`id_to_name_cached`](Self::id_to_name_cached)
+  /// for repeated calls.
   pub fn id_to_name(&self, id: u32) -> Vec<u8> {
     self.view().id_to_name(bcf::header::Id(id))
   }
 
-  /// Get the cached name for a tag ID, returning both the String and bytes.
-  /// Falls back to id_to_name() if not in cache (e.g., for dynamically added tags).
+  /// Get the cached name for a tag ID, returning both String and bytes.
+  ///
+  /// Falls back to [`id_to_name`](Self::id_to_name) if not in cache
+  /// (e.g., for dynamically added tags).
   pub fn id_to_name_cached(&self, id: u32) -> (String, Vec<u8>) {
     if let Some(cached) = self.id_to_name_cache.get(&id) {
       return cached.clone();
@@ -140,15 +207,19 @@ impl Header {
     (name, bytes)
   }
 
+  /// Get the number of samples in the VCF.
   pub fn sample_count(&self) -> usize {
     self.sample_names.len()
   }
 
+  /// Get all sample names in header order.
   pub fn sample_names(&self) -> &[String] {
     &self.sample_names
   }
 
-  /// Get the index of a sample by name, or None if not found.
+  /// Get the index of a sample by name.
+  ///
+  /// Returns `None` if the sample is not found.
   pub fn sample_idx(&self, name: &str) -> Option<usize> {
     self.sample_name_to_idx.get(name).copied()
   }
@@ -158,14 +229,23 @@ impl Header {
     &self.sample_name_to_idx
   }
 
+  /// Get the type and length of an INFO field.
+  ///
+  /// Returns `None` if the tag is not defined in the header.
   pub fn info_type(&self, tag: &[u8]) -> Option<(TagType, TagLength)> {
     self.view().info_type(tag).ok()
   }
 
+  /// Get the type and length of a FORMAT field.
+  ///
+  /// Returns `None` if the tag is not defined in the header.
   pub fn format_type(&self, tag: &[u8]) -> Option<(TagType, TagLength)> {
     self.view().format_type(tag).ok()
   }
 
+  /// Synchronize header changes to the underlying htslib structure.
+  ///
+  /// Called automatically after modifications; usually not needed directly.
   pub fn sync(&self) {
     if !self.dirty.swap(false, Ordering::AcqRel) {
       return;
@@ -175,6 +255,9 @@ impl Header {
     }
   }
 
+  /// Append a raw header line (e.g., `##INFO=<...>`).
+  ///
+  /// Returns `true` on success, `false` on failure.
   pub fn push_record(&self, record: &[u8]) -> bool {
     let Ok(c_str) = CString::new(record) else {
       return false;
@@ -185,6 +268,16 @@ impl Header {
     r == 0
   }
 
+  /// Add an INFO field definition to the header.
+  ///
+  /// # Arguments
+  ///
+  /// * `id` - Field ID (e.g., "DP")
+  /// * `number` - Number field ("1", "A", "R", "G", ".")
+  /// * `ty` - Type ("Integer", "Float", "String", "Flag")
+  /// * `description` - Human-readable description
+  ///
+  /// Returns `true` on success.
   pub fn add_info(&self, id: &str, number: &str, ty: &str, description: &str) -> bool {
     let record =
       format!("##INFO=<ID={id},Number={number},Type={ty},Description=\"{description}\">",
@@ -192,6 +285,16 @@ impl Header {
     self.push_record(record.as_bytes())
   }
 
+  /// Add a FORMAT field definition to the header.
+  ///
+  /// # Arguments
+  ///
+  /// * `id` - Field ID (e.g., "GQ")
+  /// * `number` - Number field ("1", "A", "R", "G", ".")
+  /// * `ty` - Type ("Integer", "Float", "String")
+  /// * `description` - Human-readable description
+  ///
+  /// Returns `true` on success.
   pub fn add_format(&self, id: &str, number: &str, ty: &str, description: &str) -> bool {
     let record =
       format!("##FORMAT=<ID={id},Number={number},Type={ty},Description=\"{description}\">",
@@ -199,6 +302,9 @@ impl Header {
     self.push_record(record.as_bytes())
   }
 
+  /// Format the header as a VCF header string.
+  ///
+  /// Returns `None` if formatting fails.
   pub fn to_string(&self) -> Option<String> {
     self.sync();
 
@@ -226,6 +332,14 @@ impl Header {
     Some(text)
   }
 
+  /// Get a specific field definition by section and ID.
+  ///
+  /// # Arguments
+  ///
+  /// * `section` - "INFO" or "FORMAT"
+  /// * `id` - Field ID (e.g., "DP")
+  ///
+  /// Returns `None` if the field is not found.
   pub fn get_field(&self, section: &str, id: &str) -> Option<HeaderField> {
     let tag_info = match section {
       "INFO" => self.info_type(id.as_bytes()),
@@ -270,6 +384,9 @@ impl Header {
     })
   }
 
+  /// Get all INFO, FORMAT, and FILTER field definitions.
+  ///
+  /// Returns a vector of (section, field) tuples.
   pub fn all_fields(&self) -> Vec<(String, HeaderField)> {
     let mut fields = Vec::new();
     for record in self.header_records() {
@@ -295,6 +412,7 @@ impl Header {
     fields
   }
 
+  /// Parse a header record into a HeaderField (internal use).
   fn parse_record_to_field(
     &self,
     section: &str,

@@ -1,3 +1,33 @@
+//! V8-based `Reader` class exposed to JavaScript.
+//!
+//! This module provides the `Reader` constructor available in JS expressions,
+//! enabling scripts to open additional VCF/BCF files and iterate their records.
+//!
+//! # JavaScript Usage
+//!
+//! ```js
+//! const reader = new Reader('other.vcf.gz')
+//!
+//! // Iterate all records
+//! for (const v of reader) {
+//!     print(v.chrom + ':' + v.pos)
+//! }
+//!
+//! // Query a region (requires index)
+//! if (reader.hasIndex()) {
+//!     reader.query('chr1:1000-2000')
+//!     for (const v of reader) {
+//!         // ... variants in region
+//!     }
+//! }
+//!
+//! // Access header
+//! const samples = reader.header().samples()
+//! ```
+//!
+//! The `Reader` implements the JS iterator protocol (`[Symbol.iterator]` and
+//! `next()`), so it can be used directly in `for...of` loops.
+
 use htsvcf_core::reader::{open_reader, Reader as CoreReader};
 
 use crate::header::{create_header_object, Header};
@@ -265,7 +295,7 @@ fn set_kv(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Local<v8::Object>, key: &s
 /// Create the `Reader` constructor and install it on the global.
 ///
 /// Returns the created constructor function.
-pub fn create_reader_constructor<'a>(
+pub(crate) fn create_reader_constructor<'a>(
     scope: &mut v8::PinScope<'a, '_>,
 ) -> v8::Local<'a, v8::Function> {
     let function_template = v8::FunctionTemplate::new(scope, reader_ctor);

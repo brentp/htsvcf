@@ -1,3 +1,31 @@
+//! V8-based `Header` object exposed to JavaScript.
+//!
+//! This module wraps [`htsvcf_core::Header`] for use in the V8 runtime, providing
+//! access to VCF header metadata (INFO/FORMAT definitions, sample names, etc.).
+//!
+//! # JavaScript Usage
+//!
+//! The `header` global is available in all JS expressions:
+//!
+//! ```js
+//! // List sample names
+//! header.samples()  // => ["NA12878", "NA12879", ...]
+//!
+//! // Get field definition
+//! header.get('INFO', 'DP')
+//! // => { id: 'DP', type: 'Integer', number: '1', description: 'Read depth' }
+//!
+//! // Add new fields (for use with variant.set_info)
+//! header.addInfo('CUSTOM', '1', 'Integer', 'My annotation')
+//! header.addFormat('SCORE', '1', 'Float', 'Per-sample score')
+//!
+//! // Get all header records
+//! header.records()  // => [{ type: 'INFO', ID: 'DP', ... }, ...]
+//!
+//! // Full header text
+//! header.toString()
+//! ```
+
 use rust_htslib::bcf::header::{HeaderRecord, TagLength, TagType};
 use std::collections::HashMap;
 

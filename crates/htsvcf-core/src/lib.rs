@@ -2,7 +2,8 @@
 //!
 //! This crate provides the shared implementation for reading VCF/BCF files
 //! and accessing variant data. It is used by both the V8 binding (`htsvcf`)
-//! and the Node-API binding (`htsvcf-napi`).
+//! and the Node-API binding (`htsvcf-napi`). It has some nice additions to rust-htslib, but
+//! it's not likely you'd need to use it directly.
 //!
 //! # Overview
 //!

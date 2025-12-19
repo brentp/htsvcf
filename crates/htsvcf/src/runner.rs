@@ -1,3 +1,32 @@
+//! High-level API for running JavaScript expressions over VCF/BCF files.
+//!
+//! This module provides a simple interface for evaluating a JavaScript expression
+//! once per VCF record and collecting the results. It handles V8 initialization,
+//! isolate creation, and memory management automatically.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use htsvcf::runner::{run_vcf_expr_to_stdout, RunOptions};
+//!
+//! // Print each variant's chromosome and position
+//! run_vcf_expr_to_stdout(
+//!     "input.vcf.gz",
+//!     "`${variant.CHROM}:${variant.POS}`",
+//!     RunOptions::default(),
+//! ).unwrap();
+//! ```
+//!
+//! # Garbage Collection
+//!
+//! By default, a full GC is triggered every 100,000 records to maintain
+//! steady-state memory usage. This can be tuned via [`RunOptions::gc_every`].
+//!
+//! # Functions
+//!
+//! - [`run_vcf_expr_with`]: Evaluate expression with custom callback
+//! - [`run_vcf_expr_to_stdout`]: Convenience wrapper that prints results
+
 use rust_htslib::bcf::{self, Read};
 
 use crate::header::{create_header_object, Header};

@@ -1,3 +1,35 @@
+//! Region string parsing utilities.
+//!
+//! This module provides functions for parsing genomic region strings in the
+//! standard format used by samtools, bcftools, and other htslib-based tools.
+//!
+//! # Supported Formats
+//!
+//! - `chr` - entire chromosome
+//! - `chr:start` - from start position to end of chromosome
+//! - `chr:start-end` - specific range
+//!
+//! # Coordinate Systems
+//!
+//! Input coordinates are **1-based inclusive** (standard VCF/genomics convention).
+//! Output coordinates are **0-based** for direct use with htslib APIs.
+//!
+//! # Example
+//!
+//! ```
+//! use htsvcf_core::region::parse_region_1based;
+//!
+//! // Parse "chr1:1000-2000" (1-based input)
+//! let (chrom, start0, end0) = parse_region_1based("chr1:1000-2000").unwrap();
+//! assert_eq!(chrom, "chr1");
+//! assert_eq!(start0, 999);  // 0-based
+//! assert_eq!(end0, Some(1999));  // 0-based
+//!
+//! // Commas in numbers are stripped
+//! let (_, start0, _) = parse_region_1based("chr1:1,000,000").unwrap();
+//! assert_eq!(start0, 999_999);
+//! ```
+
 /// Parse a region string like `chr`, `chr:100`, or `chr:100-200`.
 ///
 /// Input coordinates are 1-based inclusive, output is 0-based (start) and optional 0-based (end).

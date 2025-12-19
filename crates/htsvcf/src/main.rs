@@ -1,3 +1,17 @@
+//! Command-line interface for htsvcf.
+//!
+//! This binary evaluates JavaScript expressions on VCF/BCF records, streaming
+//! one output line per input variant.
+//!
+//! # Usage
+//!
+//! ```bash
+//! htsvcf input.vcf.gz "variant.chrom + ':' + variant.pos"
+//! ```
+//!
+//! The expression has access to `variant` (the current record) and `header`
+//! (VCF header metadata). See the library documentation for the full API.
+
 use std::io::{BufWriter, Write};
 
 use argh::FromArgs;

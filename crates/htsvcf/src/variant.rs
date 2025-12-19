@@ -1,3 +1,40 @@
+//! V8-based `Variant` object representing a single VCF/BCF record.
+//!
+//! This module exposes VCF record data to JavaScript, providing typed access
+//! to all standard VCF fields (CHROM, POS, REF, ALT, QUAL, FILTER, INFO, FORMAT).
+//!
+//! # JavaScript Usage
+//!
+//! The `variant` global represents the current record in expression evaluation:
+//!
+//! ```js
+//! // Read-only fields
+//! variant.chrom      // "chr1"
+//! variant.pos        // 12345 (1-based)
+//! variant.start      // 12344 (0-based)
+//! variant.stop       // end position
+//! variant.ref        // "A"
+//! variant.alt        // ["G", "T"]
+//!
+//! // Read/write fields
+//! variant.id = "rs12345"
+//! variant.qual = 30.0
+//! variant.filter = ["PASS"]
+//!
+//! // INFO access (typed by header definition)
+//! variant.info('DP')           // => 42
+//! variant.set_info('DP', 100)
+//! variant.set_info('DP', null) // clear
+//!
+//! // FORMAT access (per-sample arrays)
+//! variant.format('GT')         // => ["0/1", "0/0"]
+//! variant.sample('NA12878')    // => { GT: "0/1", DP: 30, ... }
+//! variant.samples()            // => [{ GT: "0/1", ... }, ...]
+//!
+//! // Output
+//! variant.toString()           // full VCF line
+//! ```
+
 use crate::header;
 use htsvcf_core::{FormatValue, InfoValue};
 use rust_htslib::bcf;
@@ -122,6 +159,9 @@ impl Variant {
         String::from_utf8_lossy(&self.record.get(scope).id()).into_owned()
     }
 
+    /// Set the `ID` field.
+    ///
+    /// Pass an empty string to clear the ID (sets to ".").
     pub fn set_id(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
@@ -165,6 +205,9 @@ impl Variant {
         }
     }
 
+    /// Set the QUAL field.
+    ///
+    /// Pass `None` to set QUAL to missing.
     pub fn set_qual(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
@@ -191,6 +234,9 @@ impl Variant {
         out
     }
 
+    /// Set the FILTER column.
+    ///
+    /// Pass an empty slice, `[""]`, or `["."]` to clear all filters.
     pub fn set_filters(
         &self,
         scope: &mut v8::PinScope<'_, '_>,

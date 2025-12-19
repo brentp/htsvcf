@@ -1,3 +1,25 @@
+//! V8 runtime initialization and global locking.
+//!
+//! This module manages the V8 JavaScript engine lifecycle, which is global
+//! process state. V8 must be initialized exactly once per process, and
+//! concurrent isolate creation from multiple threads must be serialized.
+//!
+//! # Thread Safety
+//!
+//! V8 isolates are single-threaded, but the platform itself requires careful
+//! coordination. Use [`v8_lock()`] before creating or entering isolates from
+//! multiple threads.
+//!
+//! # Initialization
+//!
+//! Call [`ensure_v8_initialized()`] before any V8 operations. It is safe to
+//! call multiple times; initialization only happens once.
+//!
+//! # V8 Flags
+//!
+//! The runtime enables `--expose-gc` to allow explicit garbage collection
+//! during benchmarking and diagnostics.
+
 use std::sync::{Mutex, OnceLock};
 
 pub(crate) const V8_FLAGS: &str = "--no_freeze_flags_after_init --expose-gc";

@@ -1,29 +1,115 @@
+//! VCF variant record representation and field access.
+//!
+//! This module provides types and functions for working with VCF/BCF variant
+//! records. The [`Variant`] struct wraps a `bcf::Record` and provides convenient
+//! access to standard VCF fields (CHROM, POS, REF, ALT, etc.) as well as INFO
+//! and FORMAT data.
+//!
+//! # Value Types
+//!
+//! - [`InfoValue`]: Represents INFO field values (scalar, array, flag, or absent)
+//! - [`FormatValue`]: Represents FORMAT field values (per-sample data)
+//!
+//! # Standalone Functions
+//!
+//! For cases where you have a borrowed `bcf::Record` reference (e.g., from a
+//! GcCell in V8 bindings), standalone helper functions are provided:
+//!
+//! - [`record_info`]: Get INFO field from a borrowed record
+//! - [`record_format`]: Get FORMAT field from a borrowed record
+//! - [`record_sample`]: Get all FORMAT fields for a single sample
+//! - [`record_samples`]: Get all FORMAT fields for multiple samples
+//! - [`record_to_string`]: Format record as VCF line
+//!
+//! # Example
+//!
+//! ```no_run
+//! use htsvcf_core::variant::{Variant, InfoValue};
+//! use htsvcf_core::header::Header;
+//! use rust_htslib::bcf::{self, Read};
+//!
+//! let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+//! let header = unsafe { Header::new(reader.header().inner) };
+//!
+//! for result in reader.records() {
+//!     let record = result.unwrap();
+//!     let variant = Variant::from_record(record);
+//!
+//!     println!("{}:{}", variant.chrom(), variant.pos());
+//!
+//!     // Access INFO fields
+//!     match variant.info(&header, "DP") {
+//!         InfoValue::Int(dp) => println!("DP = {}", dp),
+//!         InfoValue::Absent => println!("No DP"),
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
 use crate::header::Header;
 use rust_htslib::bcf;
 use rust_htslib::bcf::header::{TagLength, TagType};
 use rust_htslib::bcf::record::Numeric;
 use std::ffi::CString;
 
+/// Represents a value from an INFO field in a VCF record.
+///
+/// INFO fields can hold various types of data (flags, integers, floats, strings)
+/// and can be scalar or array-valued. This enum captures all possible states:
+///
+/// - `Absent`: The tag is not present in the record
+/// - `Missing`: The tag is present but has no value (`.` in VCF)
+/// - `Bool`: A flag (presence/absence)
+/// - `Int`: A single integer value
+/// - `Float`: A single float value
+/// - `String`: A single string value
+/// - `Array`: Multiple values of any type
 #[derive(Debug, Clone, PartialEq)]
 pub enum InfoValue {
+  /// The INFO tag is not present in the record.
   Absent,
+  /// The INFO tag is present but has a missing value (`.`).
   Missing,
+  /// A boolean flag (true if present).
   Bool(bool),
+  /// A single integer value.
   Int(i32),
+  /// A single float value.
   Float(f32),
+  /// A single string value.
   String(String),
+  /// An array of values (for Number != 1 fields).
   Array(Vec<InfoValue>),
 }
 
 
+/// Represents a value from a FORMAT field in a VCF record.
+///
+/// FORMAT fields contain per-sample data and can hold integers, floats, or strings.
+/// Values can be scalar, array-valued, or organized per-sample.
+///
+/// - `Absent`: The tag is not present in the record
+/// - `Missing`: The tag is present but has no value (`.` in VCF)
+/// - `Int`: A single integer value
+/// - `Float`: A single float value
+/// - `String`: A single string value
+/// - `Array`: Multiple values (for Number != 1 fields)
+/// - `PerSample`: A vector of values, one per sample in the VCF
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormatValue {
+  /// The FORMAT tag is not present in the record.
   Absent,
+  /// The FORMAT tag is present but has a missing value (`.`).
   Missing,
+  /// A single integer value.
   Int(i32),
+  /// A single float value.
   Float(f32),
+  /// A single string value.
   String(String),
+  /// An array of values (for Number != 1 fields).
   Array(Vec<FormatValue>),
+  /// Per-sample values, one entry per sample in the VCF.
   PerSample(Vec<FormatValue>),
 }
 
@@ -413,6 +499,25 @@ pub fn record_clear_info(
   Ok(())
 }
 
+/// A VCF/BCF variant record with convenient field accessors.
+///
+/// `Variant` wraps a `rust_htslib::bcf::Record` and provides methods for
+/// accessing standard VCF fields (CHROM, POS, REF, ALT, etc.) as well as
+/// INFO and FORMAT data.
+///
+/// # Example
+///
+/// ```no_run
+/// use htsvcf_core::variant::Variant;
+/// use rust_htslib::bcf::{self, Read};
+///
+/// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+/// for result in reader.records() {
+///     let record = result.unwrap();
+///     let variant = Variant::from_record(record);
+///     println!("{}:{} {}", variant.chrom(), variant.pos(), variant.reference());
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Variant {
   record: bcf::Record,
@@ -420,6 +525,9 @@ pub struct Variant {
 }
 
 impl Variant {
+  /// Create a `Variant` from a `bcf::Record`.
+  ///
+  /// The record is unpacked and the chromosome name is cached for efficient access.
   pub fn from_record(mut record: bcf::Record) -> Self {
     record.unpack();
     let chrom = match record.rid() {
@@ -434,36 +542,56 @@ impl Variant {
     Self { record, chrom }
   }
 
+  /// Get the chromosome/contig name (CHROM column).
   pub fn chrom(&self) -> &str {
     &self.chrom
   }
 
+  /// Get the reference sequence ID (rid) from the header, if present.
   pub fn rid(&self) -> Option<u32> {
     self.record.rid()
   }
 
+  /// Get the zero-based start position.
+  ///
+  /// This is the internal representation used by htslib. For 1-based VCF
+  /// coordinates, use [`pos()`](Self::pos).
   pub fn start(&self) -> i64 {
     self.record.pos()
   }
 
+  /// Get the 1-based position (POS column).
+  ///
+  /// This matches the coordinate shown in VCF files.
   pub fn pos(&self) -> i64 {
     self.record.pos() + 1
   }
 
+  /// Get the end coordinate (htslib semantics).
+  ///
+  /// For SNPs this equals `start + 1`. For indels and other variants,
+  /// this reflects the span of the reference allele.
   pub fn end(&self) -> i64 {
     self.record.end()
   }
 
+  /// Get the variant ID (ID column).
+  ///
+  /// Returns "." if no ID is set.
   pub fn id(&self) -> String {
     String::from_utf8_lossy(&self.record.id()).into_owned()
   }
 
+  /// Set the variant ID (ID column).
+  ///
+  /// Pass an empty string or "." to clear the ID.
   pub fn set_id(&mut self, id: &str) -> Result<(), rust_htslib::errors::Error> {
     let id = if id.is_empty() { "." } else { id };
     self.record.set_id(id.as_bytes())?;
     Ok(())
   }
 
+  /// Get the reference allele (REF column).
   pub fn reference(&self) -> String {
     self.record
       .alleles()
@@ -472,6 +600,10 @@ impl Variant {
       .unwrap_or_else(|| ".".to_string())
   }
 
+  /// Get the alternate alleles (ALT column).
+  ///
+  /// Returns a vector of alternate allele strings. May be empty if there
+  /// are no alternates.
   pub fn alts(&self) -> Vec<String> {
     self.record
       .alleles()
@@ -481,6 +613,9 @@ impl Variant {
       .collect()
   }
 
+  /// Get the quality score (QUAL column).
+  ///
+  /// Returns `None` if QUAL is missing (`.` in VCF).
   pub fn qual(&self) -> Option<f32> {
     let qual = self.record.qual();
     if qual.is_missing() {
@@ -490,6 +625,9 @@ impl Variant {
     }
   }
 
+  /// Set the quality score (QUAL column).
+  ///
+  /// Pass `None` to set QUAL to missing (`.`).
   pub fn set_qual(&mut self, qual: Option<f32>) {
     match qual {
       Some(v) => self.record.set_qual(v),
@@ -510,6 +648,10 @@ impl Variant {
     out
   }
 
+  /// Set the FILTER column.
+  ///
+  /// Pass an empty slice, `[""]`, or `["."]` to clear all filters.
+  /// Otherwise, provide an array of filter names to set.
   pub fn set_filters(&mut self, filters: &[String]) -> Result<(), rust_htslib::errors::Error> {
     let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0].is_empty() || filters[0] == ".")) ;
 
@@ -524,6 +666,10 @@ impl Variant {
     Ok(())
   }
 
+  /// Set an INFO flag value.
+  ///
+  /// Pass `true` to set the flag, `false` to clear it.
+  /// Returns an error if the tag is not defined in the header or is not a Flag type.
   pub fn set_info_flag(&mut self, header: &Header, tag: &str, is_set: bool) -> Result<(), rust_htslib::errors::Error> {
     let (tag_type, _) = header
       .info_type(tag.as_bytes())
@@ -543,6 +689,10 @@ impl Variant {
     Ok(())
   }
 
+  /// Set an INFO integer value.
+  ///
+  /// Pass a slice of integers to set. For scalar fields (Number=1), pass a single-element slice.
+  /// Returns an error if the tag is not defined in the header or is not an Integer type.
   pub fn set_info_integer(&mut self, header: &Header, tag: &str, values: &[i32]) -> Result<(), rust_htslib::errors::Error> {
     let (tag_type, _) = header
       .info_type(tag.as_bytes())
@@ -557,6 +707,10 @@ impl Variant {
     Ok(())
   }
 
+  /// Set an INFO float value.
+  ///
+  /// Pass a slice of floats to set. For scalar fields (Number=1), pass a single-element slice.
+  /// Returns an error if the tag is not defined in the header or is not a Float type.
   pub fn set_info_float(&mut self, header: &Header, tag: &str, values: &[f32]) -> Result<(), rust_htslib::errors::Error> {
     let (tag_type, _) = header
       .info_type(tag.as_bytes())
@@ -571,6 +725,10 @@ impl Variant {
     Ok(())
   }
 
+  /// Set an INFO string value.
+  ///
+  /// Pass a slice of strings to set. For scalar fields (Number=1), pass a single-element slice.
+  /// Returns an error if the tag is not defined in the header or is not a String type.
   pub fn set_info_string(&mut self, header: &Header, tag: &str, values: &[String]) -> Result<(), rust_htslib::errors::Error> {
     let (tag_type, _) = header
       .info_type(tag.as_bytes())
@@ -586,6 +744,9 @@ impl Variant {
     Ok(())
   }
 
+  /// Clear (remove) an INFO field from the record.
+  ///
+  /// Returns an error if the tag is not defined in the header.
   pub fn clear_info(&mut self, header: &Header, tag: &str) -> Result<(), rust_htslib::errors::Error> {
     let (tag_type, _) = header
       .info_type(tag.as_bytes())
@@ -602,6 +763,11 @@ impl Variant {
     Ok(())
   }
 
+  /// Get an INFO field value by tag name.
+  ///
+  /// Returns the appropriate [`InfoValue`] variant based on the tag's type
+  /// as defined in the header. Returns [`InfoValue::Absent`] if the tag
+  /// is not present in this record.
   pub fn info(&self, header: &Header, tag: &str) -> InfoValue {
 
     let (tag_type, tag_length) = match header.info_type(tag.as_bytes()) {
@@ -633,6 +799,10 @@ impl Variant {
     }
   }
 
+  /// Get a FORMAT field value by tag name.
+  ///
+  /// Returns a [`FormatValue::PerSample`] containing values for all samples,
+  /// or [`FormatValue::Absent`] if the tag is not present in this record.
   pub fn format(&self, header: &Header, tag: &str) -> FormatValue {
     let (tag_type, tag_length) = match header.format_type(tag.as_bytes()) {
       Some(v) => v,
@@ -676,6 +846,11 @@ impl Variant {
     }
   }
 
+  /// Get all FORMAT field values for a single sample by name.
+  ///
+  /// Returns a vector of (tag_name, value) pairs for all FORMAT fields present
+  /// in this record, plus a `sample_name` entry with the sample's name.
+  /// Returns `None` if the sample is not found.
   pub fn sample(&self, header: &Header, sample: &str) -> Option<Vec<(String, FormatValue)>> {
     let sample_id = header.sample_id(sample.as_bytes())?;
     let sample_count = self.record.sample_count() as usize;
@@ -805,6 +980,9 @@ impl Variant {
   }
 
   /// Get the list of FORMAT tag names present in this record.
+  ///
+  /// Returns a vector of (name_string, name_bytes) tuples for efficient
+  /// subsequent lookups.
   fn get_format_tag_names(&self, header: &Header) -> Vec<(String, Vec<u8>)> {
     let record_ptr = self.record.inner() as *const rust_htslib::htslib::bcf1_t
       as *mut rust_htslib::htslib::bcf1_t;
@@ -826,6 +1004,10 @@ impl Variant {
   }
 
 
+  /// Format the record as a VCF line string.
+  ///
+  /// Returns the record formatted as a tab-separated VCF line (without newline),
+  /// or `None` if formatting fails.
   pub fn to_string(&self, header: &Header) -> Option<String> {
     let mut s = rust_htslib::htslib::kstring_t {
       l: 0,
