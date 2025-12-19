@@ -466,6 +466,65 @@ impl Evaluator {
         serde_v8::from_v8(scope, result).map_err(|e| EvalError::RuntimeError(e.to_string()))
     }
 
+    /// Add JavaScript code to the evaluator's context.
+    ///
+    /// This allows defining functions, variables, or other JavaScript code that
+    /// can be used by subsequent [`eval`](Self::eval) calls. The script is
+    /// executed immediately in the V8 context.
+    ///
+    /// # Arguments
+    ///
+    /// * `script` - JavaScript code to execute (e.g., function definitions)
+    ///
+    /// # Errors
+    ///
+    /// - `EvalError::CompileError` - JavaScript syntax error
+    /// - `EvalError::RuntimeError` - JavaScript runtime error during execution
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use htsvcf::Evaluator;
+    /// use rust_htslib::bcf::{self, Read};
+    ///
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
+    ///
+    /// // Define a custom filter function
+    /// eval.add_script("function passes(v) { return v.info('DP') > 10 }").unwrap();
+    ///
+    /// for result in reader.records() {
+    ///     let record = result.unwrap();
+    ///     eval.set_record(record);
+    ///
+    ///     // Use the custom function in expressions
+    ///     let passes: bool = eval.eval("passes(variant)").unwrap();
+    ///     if passes {
+    ///         let record = eval.take().unwrap();
+    ///         // write record to output...
+    ///     }
+    /// }
+    /// ```
+    pub fn add_script(&mut self, script: &str) -> Result<(), EvalError> {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let code = v8::String::new(scope, script)
+            .ok_or_else(|| EvalError::V8Setup("failed to create script string".into()))?;
+
+        let compiled = v8::Script::compile(scope, code, None)
+            .ok_or_else(|| EvalError::CompileError(format!("failed to compile: {}", script)))?;
+
+        compiled
+            .run(scope)
+            .ok_or_else(|| EvalError::RuntimeError("script execution failed".into()))?;
+
+        Ok(())
+    }
+
     /// Take ownership of the bcf::Record from the last evaluated variant.
     ///
     /// Returns `None` if:
@@ -1250,5 +1309,192 @@ mod tests {
 
         // Verify they're different records (different positions)
         assert_ne!(taken1.pos(), taken2.pos());
+    }
+
+    #[test]
+    fn test_add_script_simple_function() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Add a simple function
+        js_eval
+            .add_script("function double(x) { return x * 2 }")
+            .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let result: i32 = js_eval.eval("double(5)").unwrap();
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn test_add_script_filter_function() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Add a filter function that uses the variant
+        js_eval
+            .add_script("function passes(v) { return v.info('DP') > 5 }")
+            .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        // DP is 10, so passes should return true
+        let result: bool = js_eval.eval("passes(variant)").unwrap();
+        assert!(result);
+
+        // Test with a threshold that should fail
+        js_eval
+            .add_script("function highDepth(v) { return v.info('DP') > 100 }")
+            .unwrap();
+        let result: bool = js_eval.eval("highDepth(variant)").unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_add_script_multiple_functions() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Add multiple functions in one script
+        js_eval
+            .add_script(
+                r#"
+                function getLocation(v) { return v.chrom + ':' + v.pos }
+                function hasHighDP(v) { return v.info('DP') >= 10 }
+                const MIN_DP = 5;
+                function meetsMinDP(v) { return v.info('DP') >= MIN_DP }
+            "#,
+            )
+            .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let loc: String = js_eval.eval("getLocation(variant)").unwrap();
+        assert_eq!(loc, "chr1:1000");
+
+        let high_dp: bool = js_eval.eval("hasHighDP(variant)").unwrap();
+        assert!(high_dp);
+
+        let meets_min: bool = js_eval.eval("meetsMinDP(variant)").unwrap();
+        assert!(meets_min);
+    }
+
+    #[test]
+    fn test_add_script_before_set_record() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Add script before setting any record (should work)
+        js_eval
+            .add_script("function add(a, b) { return a + b }")
+            .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let result: i32 = js_eval.eval("add(3, 4)").unwrap();
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn test_add_script_compile_error() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let result = js_eval.add_script("function invalid syntax {{{{");
+        assert!(result.is_err());
+        match result {
+            Err(EvalError::CompileError(_)) => {}
+            _ => panic!("expected CompileError"),
+        }
+    }
+
+    #[test]
+    fn test_add_script_runtime_error() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        let result = js_eval.add_script("throw new Error('intentional error')");
+        assert!(result.is_err());
+        match result {
+            Err(EvalError::RuntimeError(_)) => {}
+            _ => panic!("expected RuntimeError"),
+        }
+    }
+
+    #[test]
+    fn test_add_script_persists_across_records() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval
+            .add_script("function getPos(v) { return v.pos }")
+            .unwrap();
+
+        let mut positions = Vec::new();
+        for result in reader.records().take(3) {
+            let record = result.unwrap();
+            js_eval.set_record(record);
+            let pos: i64 = js_eval.eval("getPos(variant)").unwrap();
+            positions.push(pos);
+        }
+
+        assert_eq!(positions.len(), 3);
+        assert_eq!(positions[0], 1000);
+    }
+
+    #[test]
+    fn test_add_script_with_global_variables() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Add global variables and use them in functions
+        js_eval.add_script("let counter = 0").unwrap();
+        js_eval
+            .add_script("function incrementCounter() { return ++counter }")
+            .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let c1: i32 = js_eval.eval("incrementCounter()").unwrap();
+        let c2: i32 = js_eval.eval("incrementCounter()").unwrap();
+        let c3: i32 = js_eval.eval("incrementCounter()").unwrap();
+
+        assert_eq!(c1, 1);
+        assert_eq!(c2, 2);
+        assert_eq!(c3, 3);
+    }
+
+    #[test]
+    fn test_add_script_can_access_header() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // The header global should be accessible from added scripts
+        js_eval
+            .add_script("function getSampleCount() { return header.samples.length }")
+            .unwrap();
+
+        // No record needed - just accessing header
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        let count: i32 = js_eval.eval("getSampleCount()").unwrap();
+        assert!(count >= 0);
     }
 }

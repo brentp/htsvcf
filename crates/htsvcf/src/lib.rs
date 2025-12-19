@@ -35,15 +35,19 @@
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
 //!     let mut eval = Evaluator::new(reader.header())?;
 //!
+//!     // Define reusable functions with add_script()
+//!     eval.add_script("function passes(v) { return v.info('DP') > 10 }")?;
+//!
 //!     for result in reader.records() {
 //!         let record = result?;
 //!         eval.set_record(record);
 //!         
-//!         // Multiple expressions can be evaluated against the same record
-//!         // Each expression is compiled once and cached
-//!         let dp: i32 = eval.eval("variant.info('DP')")?;
-//!         let af: Vec<f32> = eval.eval("variant.info('AF')")?;
-//!         println!("DP = {}, AF = {:?}", dp, af);
+//!         // Expressions are compiled once and cached
+//!         let dominated: bool = eval.eval("passes(variant) && variant.qual > 20")?;
+//!         if dominated {
+//!             let record = eval.take().unwrap();
+//!             // write record...
+//!         }
 //!     }
 //!     Ok(())
 //! }

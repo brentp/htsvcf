@@ -27,13 +27,18 @@ use htsvcf::Evaluator;
 use rust_htslib::bcf::{self, Read};
 
 let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 20")?;
+let mut eval = Evaluator::new(reader.header())?;
+
+// Optionally define custom functions
+eval.add_script("function passes(v) { return v.info('DP') > 20 }")?;
 
 for result in reader.records() {
     let record = result?;
-    if js_eval.eval::<bool>(record)? {
+    eval.set_record(record);
+    
+    if eval.eval::<bool>("passes(variant)")? {
         // Use take() to get ownership of the record
-        let record = js_eval.take().unwrap();
+        let record = eval.take().unwrap();
         // write record to output, collect it, etc.
     }
 }

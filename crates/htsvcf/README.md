@@ -205,6 +205,45 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+#### Custom Functions with `add_script()`
+
+Use `add_script()` to define reusable JavaScript functions that can be called from expressions:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut eval = Evaluator::new(reader.header())?;
+
+    // Define custom filter functions
+    eval.add_script("function passes(v) { return v.info('DP') > 10 && v.qual > 20 }")?;
+    eval.add_script("function isRare(v) { 
+        const af = v.info('AF');
+        return af && af[0] < 0.01;
+    }")?;
+
+    // Define constants
+    eval.add_script("const MIN_DP = 5")?;
+
+    for result in reader.records() {
+        let record = result?;
+        eval.set_record(record);
+
+        // Use custom functions in expressions
+        if eval.eval::<bool>("passes(variant) && isRare(variant)")? {
+            let record = eval.take().unwrap();
+            // write record...
+        }
+    }
+    Ok(())
+}
+```
+
+Scripts are executed immediately when added, so you can define functions, constants,
+or run any initialization code. All definitions persist across records.
+
 #### Complex Expressions
 
 The JS expression can include multi-statement logic:
