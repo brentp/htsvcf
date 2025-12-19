@@ -63,6 +63,25 @@ The `eval::<T>()` method supports these Rust types:
 - `Vec<T>` - arrays (e.g., `Vec<f64>` for `variant.info('AF')`)
 - `Option<T>` - returns `None` for `null`/`undefined`
 
+For complex types (custom structs, `serde_json::Value`, `HashMap`), use `eval_serde::<T>()`:
+
+```rust
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct VariantSummary {
+    chrom: String,
+    pos: i64,
+    depth: Option<i32>,
+}
+
+let mut js_eval = Evaluator::new(
+    reader.header(),
+    "({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })"
+)?;
+let summary: VariantSummary = js_eval.eval_serde(record)?;
+```
+
 #### Filtering
 
 Use `eval::<bool>()` to filter variants:

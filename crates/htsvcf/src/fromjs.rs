@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use v8;
 
 /// Helper to truncate a string for error messages (max 50 chars).
@@ -22,8 +21,9 @@ pub(crate) fn truncate_for_error(s: &str) -> String {
 /// - `f32`, `f64` - extracts floating point numbers
 /// - `Vec<T>` - extracts arrays where each element is converted to `T`
 /// - `Option<T>` - returns `None` for `null`/`undefined`, otherwise `Some(T)`
-/// - `serde_json::Value` - converts to JSON-compatible values (null, bool, number, string, array, object)
-/// - `HashMap<String, serde_json::Value>` - extracts JS objects as string-keyed maps
+///
+/// For complex types like `serde_json::Value`, `HashMap<String, T>`, or custom
+/// structs with `#[derive(Deserialize)]`, use [`Evaluator::eval_serde`] instead.
 ///
 /// # Example
 ///
@@ -197,118 +197,5 @@ impl<T: FromJsValue> FromJsValue for Option<T> {
         } else {
             Ok(Some(T::from_js_value(scope, value)?))
         }
-    }
-}
-
-impl FromJsValue for serde_json::Value {
-    fn from_js_value(
-        scope: &mut v8::PinScope<'_, '_>,
-        value: v8::Local<v8::Value>,
-    ) -> Result<Self, String> {
-        if value.is_null_or_undefined() {
-            Ok(serde_json::Value::Null)
-        } else if value.is_boolean() {
-            Ok(serde_json::Value::Bool(value.boolean_value(scope)))
-        } else if value.is_number() {
-            let n = value
-                .number_value(scope)
-                .ok_or_else(|| "failed to get number value".to_string())?;
-            if let Some(i) = serde_json::Number::from_f64(n) {
-                Ok(serde_json::Value::Number(i))
-            } else {
-                Ok(serde_json::Value::Null)
-            }
-        } else if value.is_string() {
-            let s = value
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-                .ok_or_else(|| "failed to convert to string".to_string())?;
-            Ok(serde_json::Value::String(s))
-        } else if value.is_array() {
-            let arr = v8::Local::<v8::Array>::try_from(value).map_err(|_| "expected array")?;
-            let mut result = Vec::with_capacity(arr.length() as usize);
-            for i in 0..arr.length() {
-                let elem = arr
-                    .get_index(scope, i)
-                    .ok_or_else(|| format!("failed to get array element at index {}", i))?;
-                result.push(Self::from_js_value(scope, elem)?);
-            }
-            Ok(serde_json::Value::Array(result))
-        } else if value.is_object() {
-            let obj = v8::Local::<v8::Object>::try_from(value).map_err(|_| "expected object")?;
-            let props = obj
-                .get_own_property_names(
-                    scope,
-                    v8::GetPropertyNamesArgsBuilder::new()
-                        .key_conversion(v8::KeyConversionMode::ConvertToString)
-                        .build(),
-                )
-                .ok_or_else(|| "failed to get property names".to_string())?;
-
-            let mut map = serde_json::Map::new();
-            for i in 0..props.length() {
-                let key = props
-                    .get_index(scope, i)
-                    .ok_or_else(|| format!("failed to get property at index {}", i))?;
-                let key_str = key
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .ok_or_else(|| "failed to convert key to string".to_string())?;
-                let val = obj
-                    .get(scope, key)
-                    .ok_or_else(|| format!("failed to get value for key {}", key_str))?;
-                map.insert(key_str, Self::from_js_value(scope, val)?);
-            }
-            Ok(serde_json::Value::Object(map))
-        } else {
-            let repr = value
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_else(|| "<unknown>".into());
-            Err(format!(
-                "unsupported JS value for serde_json: {}",
-                truncate_for_error(&repr)
-            ))
-        }
-    }
-}
-
-impl FromJsValue for HashMap<String, serde_json::Value> {
-    fn from_js_value(
-        scope: &mut v8::PinScope<'_, '_>,
-        value: v8::Local<v8::Value>,
-    ) -> Result<Self, String> {
-        let obj = v8::Local::<v8::Object>::try_from(value).map_err(|_| {
-            let repr = value
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_else(|| "<unknown>".into());
-            format!("expected object, got '{}'", truncate_for_error(&repr))
-        })?;
-
-        let props = obj
-            .get_own_property_names(
-                scope,
-                v8::GetPropertyNamesArgsBuilder::new()
-                    .key_conversion(v8::KeyConversionMode::ConvertToString)
-                    .build(),
-            )
-            .ok_or_else(|| "failed to get property names".to_string())?;
-
-        let mut map = HashMap::with_capacity(props.length() as usize);
-        for i in 0..props.length() {
-            let key = props
-                .get_index(scope, i)
-                .ok_or_else(|| format!("failed to get property at index {}", i))?;
-            let key_str = key
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-                .ok_or_else(|| "failed to convert key to string".to_string())?;
-            let val = obj
-                .get(scope, key)
-                .ok_or_else(|| format!("failed to get value for key {}", key_str))?;
-            map.insert(key_str, serde_json::Value::from_js_value(scope, val)?);
-        }
-        Ok(map)
     }
 }

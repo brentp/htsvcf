@@ -12,3 +12,5 @@ v8 = "142.2.0"
 rust-htslib.workspace = true
 htsvcf-core = { path = "../htsvcf-core" }
 serde_json = "1.0"
+serde_v8 = "0.285"
+serde = { version = "1.0", features = ["derive"] }

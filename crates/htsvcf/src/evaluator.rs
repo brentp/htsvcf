@@ -184,8 +184,9 @@ impl Evaluator {
     /// - `f32`, `f64` - extracts floating point numbers
     /// - `Vec<T>` - extracts arrays
     /// - `Option<T>` - returns `None` for `null`/`undefined`
-    /// - `serde_json::Value` - converts to JSON-compatible values (null, bool, number, string, array, object)
-    /// - `HashMap<String, serde_json::Value>` - extracts JS objects as string-keyed maps
+    ///
+    /// For complex types like `serde_json::Value`, `HashMap<String, T>`, or custom
+    /// structs with `#[derive(Deserialize)]`, use [`eval_serde`] instead.
     ///
     /// # Errors
     ///
@@ -197,8 +198,6 @@ impl Evaluator {
     /// ```no_run
     /// use htsvcf::Evaluator;
     /// use rust_htslib::bcf::{self, Read};
-    /// use std::collections::HashMap;
-    /// use serde_json::Value;
     ///
     /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
     ///
@@ -230,13 +229,8 @@ impl Evaluator {
     /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('MAYBE_MISSING')").unwrap();
     /// let record = reader.records().next().unwrap().unwrap();
     /// let maybe: Option<i32> = js_eval.eval(record).unwrap();
-    ///
-    /// // Extract as JSON object
-    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
-    /// let mut js_eval = Evaluator::new(reader.header(), "({x: variant.pos, y: variant.info('DP')})").unwrap();
-    /// let record = reader.records().next().unwrap().unwrap();
-    /// let obj: HashMap<String, Value> = js_eval.eval(record).unwrap();
     /// ```
+
     pub fn eval<T: FromJsValue>(&mut self, record: bcf::Record) -> Result<T, EvalError> {
         let _guard = runtime::v8_lock();
 
@@ -268,6 +262,69 @@ impl Evaluator {
 
         // Convert to requested type
         T::from_js_value(scope, result).map_err(EvalError::RuntimeError)
+    }
+
+    /// Evaluate the JS expression and deserialize the result using serde.
+    ///
+    /// Use this for complex types (custom structs, `serde_json::Value`, `HashMap`).
+    /// For primitives (`bool`, `i32`, `f64`, `String`, `Vec<T>`), prefer [`eval`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use htsvcf::Evaluator;
+    /// use rust_htslib::bcf::{self, Read};
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct VariantInfo {
+    ///     chrom: String,
+    ///     pos: i64,
+    ///     depth: Option<i32>,
+    /// }
+    ///
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut js_eval = Evaluator::new(
+    ///     reader.header(),
+    ///     "({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })"
+    /// ).unwrap();
+    /// let record = reader.records().next().unwrap().unwrap();
+    /// let info: VariantInfo = js_eval.eval_serde(record).unwrap();
+    /// ```
+    pub fn eval_serde<'de, T>(&mut self, record: bcf::Record) -> Result<T, EvalError>
+    where
+        T: serde::Deserialize<'de>,
+    {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        // Get locals from globals
+        let object_template = v8::Local::new(scope, &self.object_template);
+        let header_obj = v8::Local::new(scope, &self.header_obj);
+        let script = v8::Local::new(scope, &self.script);
+
+        // Create variant from record
+        let variant = Variant::from_record(record);
+
+        // Create variant JS object
+        let variant_object = create_variant_object(scope, object_template, variant, header_obj);
+
+        // Set variant on global
+        let global = context.global(scope);
+        let variant_name = v8::String::new(scope, "variant")
+            .ok_or_else(|| EvalError::V8Setup("failed to create variant string".into()))?;
+        global.set(scope, variant_name.into(), variant_object.into());
+
+        // Run script
+        let result = script
+            .run(scope)
+            .ok_or_else(|| EvalError::RuntimeError("script execution failed".into()))?;
+
+        // Deserialize using serde_v8
+        serde_v8::from_v8(scope, result).map_err(|e| EvalError::RuntimeError(e.to_string()))
     }
 }
 
@@ -620,12 +677,171 @@ mod tests {
         .unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
-        let result: std::collections::HashMap<String, serde_json::Value> = js_eval.eval(record).unwrap();
+        let result: std::collections::HashMap<String, serde_json::Value> =
+            js_eval.eval_serde(record).unwrap();
 
         use serde_json::json;
-        assert_eq!(result.get("a").unwrap(), &json!(1.0));
+        // serde_v8 preserves integer types, so use as_i64() for integer comparisons
+        assert_eq!(result.get("a").unwrap().as_i64().unwrap(), 1);
         assert_eq!(result.get("b").unwrap(), &json!([true, false]));
         assert_eq!(result.get("c").unwrap(), &json!({ "d": "foo" }));
         assert_eq!(result.get("e").unwrap(), &json!(null));
     }
+
+    #[test]
+    fn test_eval_serde_json_hashmap_access() {
+        use serde_json::json;
+
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        // Create a JavaScript object with nested structure
+        let mut js_eval = Evaluator::new(
+            reader.header(),
+            "({ 
+                a: 42, 
+                b: 'hello', 
+                c: [1, 2, 3], 
+                d: { nested: true, value: 3.14 },
+                e: null,
+                f: variant.info('DP') // Access actual VCF data
+            })",
+        )
+        .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let result: std::collections::HashMap<String, serde_json::Value> =
+            js_eval.eval_serde(record).unwrap();
+
+        // Test accessing numeric value - serde_v8 preserves integer types
+        assert_eq!(result["a"].as_i64().unwrap(), 42);
+
+        // Test accessing string value
+        assert_eq!(result.get("b").unwrap(), &json!("hello"));
+        assert_eq!(result["b"].as_str().unwrap(), "hello");
+
+        // Test accessing array - integers are preserved
+        let arr = result["c"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_i64().unwrap(), 1);
+        assert_eq!(arr[1].as_i64().unwrap(), 2);
+        assert_eq!(arr[2].as_i64().unwrap(), 3);
+
+        // Test accessing nested object
+        let nested = result["d"].as_object().unwrap();
+        assert_eq!(nested.get("nested").unwrap(), &json!(true));
+        assert_eq!(nested.get("value").unwrap(), &json!(3.14));
+        assert_eq!(nested["nested"].as_bool().unwrap(), true);
+        assert_eq!(nested["value"].as_f64().unwrap(), 3.14);
+
+        // Test accessing null value
+        assert_eq!(result.get("e").unwrap(), &json!(null));
+        assert!(result["e"].is_null());
+
+        // Test accessing actual VCF data (integers preserved)
+        assert_eq!(result["f"].as_i64().unwrap(), 10);
+    }
+
+    #[test]
+    fn test_eval_serde_custom_struct() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct VariantInfo {
+            chrom: String,
+            pos: i64,
+            depth: i32,
+        }
+
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(
+            reader.header(),
+            "({ chrom: variant.chrom, pos: variant.pos, depth: variant.info('DP') })",
+        )
+        .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let result: VariantInfo = js_eval.eval_serde(record).unwrap();
+
+        assert_eq!(result.chrom, "chr1");
+        assert_eq!(result.pos, 1000);
+        assert_eq!(result.depth, 10);
+    }
+
+    #[test]
+    fn test_eval_serde_json_value() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(
+            reader.header(),
+            "({ pos: variant.pos, alt: variant.alt })",
+        )
+        .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let result: serde_json::Value = js_eval.eval_serde(record).unwrap();
+
+        assert!(result.is_object());
+        assert_eq!(result["pos"].as_i64().unwrap(), 1000);
+        assert!(result["alt"].is_array());
+    }
+
+    #[test]
+    fn test_eval_serde_primitives() {
+        let path = fixture_vcf();
+
+        // Test i32
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')").unwrap();
+        let record = reader.records().next().unwrap().unwrap();
+        let result: i32 = js_eval.eval_serde(record).unwrap();
+        assert_eq!(result, 10);
+
+        // Test String
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.chrom").unwrap();
+        let record = reader.records().next().unwrap().unwrap();
+        let result: String = js_eval.eval_serde(record).unwrap();
+        assert_eq!(result, "chr1");
+
+        // Test bool
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 5").unwrap();
+        let record = reader.records().next().unwrap().unwrap();
+        let result: bool = js_eval.eval_serde(record).unwrap();
+        assert!(result);
+
+        // Test Vec
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header(), "[1, 2, 3]").unwrap();
+        let record = reader.records().next().unwrap().unwrap();
+        let result: Vec<i32> = js_eval.eval_serde(record).unwrap();
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_eval_serde_optional_fields() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, Debug)]
+        struct MaybeInfo {
+            depth: Option<i32>,
+            missing: Option<i32>,
+        }
+
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(
+            reader.header(),
+            "({ depth: variant.info('DP'), missing: variant.info('NONEXISTENT') })",
+        )
+        .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let result: MaybeInfo = js_eval.eval_serde(record).unwrap();
+
+        assert_eq!(result.depth, Some(10));
+        assert_eq!(result.missing, None);
+    }
 }
+
