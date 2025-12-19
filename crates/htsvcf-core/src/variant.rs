@@ -105,7 +105,7 @@ pub fn record_format(record: &bcf::Record, header: &Header, tag: &str) -> Format
         values
           .iter()
           .take(sample_count)
-          .map(|per_sample| format_string_to_value(*per_sample, tag_length))
+          .map(|per_sample| format_string_to_value(per_sample, tag_length))
           .collect(),
       ),
       Err(_) => FormatValue::Absent,
@@ -223,7 +223,7 @@ pub fn record_samples(
         };
         for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
           if let Some(per_sample) = all_values.get(sample_idx) {
-            let value = format_string_to_value(*per_sample, tag_length);
+            let value = format_string_to_value(per_sample, tag_length);
             results[result_idx].push((tag_name.clone(), value));
           }
         }
@@ -238,7 +238,7 @@ pub fn record_samples(
   for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
     let name = sample_names
       .get(sample_idx)
-      .map(|s| s.clone())
+      .cloned()
       .unwrap_or_else(|| format!("sample_{sample_idx}"));
     results[result_idx].push(("sample_name".to_string(), FormatValue::String(name)));
   }
@@ -511,7 +511,7 @@ impl Variant {
   }
 
   pub fn set_filters(&mut self, filters: &[String]) -> Result<(), rust_htslib::errors::Error> {
-    let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0] == "" || filters[0] == ".")) ;
+    let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0].is_empty() || filters[0] == ".")) ;
 
     if want_clear {
       let refs: Vec<&[u8]> = Vec::new();
@@ -667,7 +667,7 @@ impl Variant {
           values
             .iter()
             .take(sample_count)
-            .map(|per_sample| format_string_to_value(*per_sample, tag_length))
+            .map(|per_sample| format_string_to_value(per_sample, tag_length))
             .collect(),
         ),
         Err(_) => FormatValue::Absent,
@@ -781,7 +781,7 @@ impl Variant {
           };
           for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
             if let Some(per_sample) = all_values.get(sample_idx) {
-              let value = format_string_to_value(*per_sample, tag_length);
+              let value = format_string_to_value(per_sample, tag_length);
               results[result_idx].push((tag_name.clone(), value));
             }
           }
@@ -796,7 +796,7 @@ impl Variant {
     for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
       let name = sample_names
         .get(sample_idx)
-        .map(|s| s.clone())
+        .cloned()
         .unwrap_or_else(|| format!("sample_{sample_idx}"));
       results[result_idx].push(("sample_name".to_string(), FormatValue::String(name)));
     }
@@ -1159,7 +1159,7 @@ fn format_value_for_sample(
     TagType::String => {
       let values = record.format(tag).string().ok()?;
       let per_sample = values.get(sample_id)?;
-      Some(format_string_to_value(*per_sample, tag_length))
+      Some(format_string_to_value(per_sample, tag_length))
     }
     TagType::Flag => None,
   }

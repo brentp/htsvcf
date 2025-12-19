@@ -197,7 +197,7 @@ impl Variant {
         filters: &[String],
     ) -> Result<(), rust_htslib::errors::Error> {
         let record = self.record.get_mut(scope);
-        let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0] == "" || filters[0] == "."));
+        let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0].is_empty() || filters[0] == "."));
         if want_clear {
             let refs: Vec<&[u8]> = Vec::new();
             record.set_filters(&refs)?;

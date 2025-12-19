@@ -230,7 +230,6 @@ impl Evaluator {
     /// let record = reader.records().next().unwrap().unwrap();
     /// let maybe: Option<i32> = js_eval.eval(record).unwrap();
     /// ```
-
     pub fn eval<T: FromJsValue>(&mut self, record: bcf::Record) -> Result<T, EvalError> {
         let _guard = runtime::v8_lock();
 
@@ -701,7 +700,7 @@ mod tests {
                 a: 42, 
                 b: 'hello', 
                 c: [1, 2, 3], 
-                d: { nested: true, value: 3.14 },
+                d: { nested: true, value: 3.12 },
                 e: null,
                 f: variant.info('DP') // Access actual VCF data
             })",
@@ -729,9 +728,9 @@ mod tests {
         // Test accessing nested object
         let nested = result["d"].as_object().unwrap();
         assert_eq!(nested.get("nested").unwrap(), &json!(true));
-        assert_eq!(nested.get("value").unwrap(), &json!(3.14));
-        assert_eq!(nested["nested"].as_bool().unwrap(), true);
-        assert_eq!(nested["value"].as_f64().unwrap(), 3.14);
+        assert_eq!(nested.get("value").unwrap(), &json!(3.12));
+        assert!(nested["nested"].as_bool().unwrap());
+        assert_eq!(nested["value"].as_f64().unwrap(), 3.12);
 
         // Test accessing null value
         assert_eq!(result.get("e").unwrap(), &json!(null));
