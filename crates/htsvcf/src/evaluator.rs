@@ -184,6 +184,8 @@ impl Evaluator {
     /// - `f32`, `f64` - extracts floating point numbers
     /// - `Vec<T>` - extracts arrays
     /// - `Option<T>` - returns `None` for `null`/`undefined`
+    /// - `serde_json::Value` - converts to JSON-compatible values (null, bool, number, string, array, object)
+    /// - `HashMap<String, serde_json::Value>` - extracts JS objects as string-keyed maps
     ///
     /// # Errors
     ///
@@ -195,6 +197,8 @@ impl Evaluator {
     /// ```no_run
     /// use htsvcf::Evaluator;
     /// use rust_htslib::bcf::{self, Read};
+    /// use std::collections::HashMap;
+    /// use serde_json::Value;
     ///
     /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
     ///
@@ -226,6 +230,12 @@ impl Evaluator {
     /// let mut js_eval = Evaluator::new(reader.header(), "variant.info('MAYBE_MISSING')").unwrap();
     /// let record = reader.records().next().unwrap().unwrap();
     /// let maybe: Option<i32> = js_eval.eval(record).unwrap();
+    ///
+    /// // Extract as JSON object
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut js_eval = Evaluator::new(reader.header(), "({x: variant.pos, y: variant.info('DP')})").unwrap();
+    /// let record = reader.records().next().unwrap().unwrap();
+    /// let obj: HashMap<String, Value> = js_eval.eval(record).unwrap();
     /// ```
     pub fn eval<T: FromJsValue>(&mut self, record: bcf::Record) -> Result<T, EvalError> {
         let _guard = runtime::v8_lock();
@@ -597,5 +607,25 @@ mod tests {
 
         assert_eq!(count, 1000);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_eval_serde_json_hashmap() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(
+            reader.header(),
+            "({ a: 1, b: [true, false], c: { d: 'foo' }, e: null })",
+        )
+        .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        let result: std::collections::HashMap<String, serde_json::Value> = js_eval.eval(record).unwrap();
+
+        use serde_json::json;
+        assert_eq!(result.get("a").unwrap(), &json!(1.0));
+        assert_eq!(result.get("b").unwrap(), &json!([true, false]));
+        assert_eq!(result.get("c").unwrap(), &json!({ "d": "foo" }));
+        assert_eq!(result.get("e").unwrap(), &json!(null));
     }
 }
