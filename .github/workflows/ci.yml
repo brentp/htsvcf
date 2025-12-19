@@ -29,6 +29,16 @@ jobs:
         with:
           workspaces: |
             . -> target
+          # Cache the v8 static library download location
+          cache-directories: |
+            ~/.cargo/.rusty_v8
+
+      - name: Fix rusty_v8 linking
+        run: |
+          # The v8 crate downloads a static library to ~/.cargo/.rusty_v8
+          # serde_v8 might be trying to link against it before it's downloaded by the v8 crate.
+          # We force a build of the v8 crate first to ensure the library is present.
+          cargo build -p htsvcf --lib
 
       - name: Rust tests (v8 binding)
         run: cargo test -p htsvcf
