@@ -17,12 +17,17 @@ struct Args {
     /// javaScript expression to evaluate (default: "variant.start")
     #[argh(positional, default = "String::from(\"variant.start\")")]
     js_expr: String,
+
+    /// number of reader threads (default: 3)
+    #[argh(option, short = 't', default = "3")]
+    threads: usize,
 }
 
 fn main() -> Result<(), AnyError> {
     let args: Args = argh::from_env();
 
     let mut reader = bcf::Reader::from_path(&args.input)?;
+    reader.set_threads(args.threads)?;
     let mut evaluator = Evaluator::new(reader.header(), &args.js_expr)?;
 
     let stdout = std::io::stdout().lock();
