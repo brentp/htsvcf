@@ -151,12 +151,14 @@
 //! ```
 
 pub mod evaluator;
+pub mod fromjs;
 pub mod header;
 pub mod reader;
 pub mod runner;
 pub mod runtime;
 pub mod variant;
 
-pub use evaluator::{EvalError, Evaluator, FromJsValue};
+pub use evaluator::{EvalError, Evaluator};
+pub use fromjs::FromJsValue;
 pub use header::Header;
 pub use variant::Variant;
