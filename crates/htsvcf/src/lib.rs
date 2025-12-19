@@ -157,6 +157,6 @@ pub mod runner;
 pub mod runtime;
 pub mod variant;
 
-pub use evaluator::{EvalError, Evaluator};
+pub use evaluator::{EvalError, Evaluator, FromJsValue};
 pub use header::Header;
 pub use variant::Variant;

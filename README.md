@@ -31,7 +31,7 @@ let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 20")?;
 
 for result in reader.records() {
     let record = result?;
-    if js_eval.eval_bool(record)? {
+    if js_eval.eval::<bool>(record)? {
         println!("passed filter");
     }
 }

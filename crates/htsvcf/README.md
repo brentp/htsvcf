@@ -32,7 +32,8 @@ htsvcf = { git = "https://github.com/brentp/htsvcf", package = "htsvcf" }
 ### Evaluator API
 
 The `Evaluator` struct lets you iterate over VCF records in Rust while applying
-user-defined JavaScript expressions:
+user-defined JavaScript expressions. The generic `eval::<T>()` method converts
+JavaScript results to Rust types:
 
 ```rust
 use htsvcf::Evaluator;
@@ -44,16 +45,27 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     for result in reader.records() {
         let record = result?;
-        let dp = js_eval.eval(record)?;
+        let dp: i32 = js_eval.eval(record)?;
         println!("DP = {}", dp);
     }
     Ok(())
 }
 ```
 
-#### Filtering with `eval_bool()`
+#### Supported Types
 
-Use `eval_bool()` to filter variants based on a JavaScript expression:
+The `eval::<T>()` method supports these Rust types:
+
+- `String` - any JS value converted to string
+- `bool` - uses JavaScript truthiness (`0`, `""`, `null`, `undefined`, `NaN`, `false` are falsy)
+- `i32`, `i64` - integers
+- `f32`, `f64` - floating point numbers
+- `Vec<T>` - arrays (e.g., `Vec<f64>` for `variant.info('AF')`)
+- `Option<T>` - returns `None` for `null`/`undefined`
+
+#### Filtering
+
+Use `eval::<bool>()` to filter variants:
 
 ```rust
 use htsvcf::Evaluator;
@@ -68,11 +80,35 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let mut passed = 0;
     for result in reader.records() {
-        if js_eval.eval_bool(result?)? {
+        if js_eval.eval::<bool>(result?)? {
             passed += 1;
         }
     }
     println!("{} variants passed filter", passed);
+    Ok(())
+}
+```
+
+#### Arrays and Optional Values
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+
+    // Extract array of allele frequencies
+    let mut js_eval = Evaluator::new(reader.header(), "variant.info('AF')")?;
+    let record = reader.records().next().unwrap()?;
+    let afs: Vec<f64> = js_eval.eval(record)?;
+
+    // Handle potentially missing values
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut js_eval = Evaluator::new(reader.header(), "variant.info('MAYBE_MISSING')")?;
+    let record = reader.records().next().unwrap()?;
+    let maybe: Option<i32> = js_eval.eval(record)?;
+    
     Ok(())
 }
 ```
@@ -97,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )?;
 
     for result in reader.records() {
-        if js_eval.eval_bool(result?)? {
+        if js_eval.eval::<bool>(result?)? {
             println!("Variant has heterozygous samples");
         }
     }
