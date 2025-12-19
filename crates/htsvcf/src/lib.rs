@@ -150,11 +150,13 @@
 //! const samples = r.header().samples()
 //! ```
 
+pub mod evaluator;
 pub mod header;
 pub mod reader;
 pub mod runner;
 pub mod runtime;
 pub mod variant;
 
+pub use evaluator::{EvalError, Evaluator};
 pub use header::Header;
 pub use variant::Variant;

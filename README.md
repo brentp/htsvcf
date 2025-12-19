@@ -20,17 +20,21 @@ cargo run --release -- tests/t.vcf.gz "variant.info('DP')"
 cargo run --release -- tests/t.vcf.gz "variant.pos" --region chr1:1000-2000
 ```
 
-Use as a Rust library:
+Use as a Rust library with the `Evaluator` API:
 
 ```rust
-use htsvcf::runner::{run_vcf_expr_with, RunOptions};
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
 
-run_vcf_expr_with(
-    "tests/t.vcf.gz",
-    "variant.chrom + ':' + variant.pos",
-    RunOptions::default(),
-    |line| { println!("{line}"); Ok(()) },
-)?;
+let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP') > 20")?;
+
+for result in reader.records() {
+    let record = result?;
+    if js_eval.eval_bool(record)? {
+        println!("passed filter");
+    }
+}
 ```
 
 ## crates/htsvcf-napi + npm/htsvcf (Node.js/Bun)

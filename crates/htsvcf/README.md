@@ -24,21 +24,101 @@ The CLI prints the expression result (stringified) once per record.
 
 Add to your `Cargo.toml`:
 
-- `htsvcf = { path = "/path/to/htsvcf" }`
+```toml
+[dependencies]
+htsvcf = { git = "https://github.com/brentp/htsvcf", package = "htsvcf" }
+```
 
-Minimal example:
+### Evaluator API
+
+The `Evaluator` struct lets you iterate over VCF records in Rust while applying
+user-defined JavaScript expressions:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut js_eval = Evaluator::new(reader.header(), "variant.info('DP')")?;
+
+    for result in reader.records() {
+        let record = result?;
+        let dp = js_eval.eval(record)?;
+        println!("DP = {}", dp);
+    }
+    Ok(())
+}
+```
+
+#### Filtering with `eval_bool()`
+
+Use `eval_bool()` to filter variants based on a JavaScript expression:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut js_eval = Evaluator::new(
+        reader.header(),
+        "variant.info('DP') > 20 && variant.qual > 30"
+    )?;
+
+    let mut passed = 0;
+    for result in reader.records() {
+        if js_eval.eval_bool(result?)? {
+            passed += 1;
+        }
+    }
+    println!("{} variants passed filter", passed);
+    Ok(())
+}
+```
+
+#### Complex Expressions
+
+The JS expression can include multi-statement logic:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut js_eval = Evaluator::new(
+        reader.header(),
+        r#"
+        const gt = variant.format('GT');
+        const het_count = gt.filter(g => g && g[0] !== g[1]).length;
+        het_count > 0
+        "#
+    )?;
+
+    for result in reader.records() {
+        if js_eval.eval_bool(result?)? {
+            println!("Variant has heterozygous samples");
+        }
+    }
+    Ok(())
+}
+```
+
+### Callback-Based API
+
+For simpler use cases, `run_vcf_expr_with` handles file iteration for you:
 
 ```rust
 use htsvcf::runner::{run_vcf_expr_with, RunOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_vcf_expr_with(
-        "tests/t.vcf.gz",
+        "input.vcf.gz",
         "variant.chrom + ':' + variant.pos",
         RunOptions::default(),
-        |line| {
-            // do something with each stringified JS result
-            println!("{line}");
+        |result| {
+            println!("{result}");
             Ok(())
         },
     )
@@ -46,6 +126,38 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```
 
 ## JavaScript API
+
+### Variant Attributes
+
+```javascript
+// Core fields (read-only)
+variant.chrom   // string - chromosome/contig name
+variant.pos     // number - 1-based position (VCF POS column)
+variant.start   // number - 0-based start coordinate
+variant.stop    // number - end position
+variant.ref     // string - reference allele
+variant.alt     // string[] - array of alternate alleles
+
+// Writable fields
+variant.id      // string - variant ID (writable)
+variant.qual    // number | null - quality score (writable, set null to clear)
+variant.filter  // string[] - array of filter IDs (writable)
+
+// INFO field access
+variant.info(tag)              // get typed INFO value (uses header for type info)
+variant.set_info(tag, value)   // set INFO value (null/undefined clears the tag)
+
+// FORMAT/genotype field access
+variant.format(tag)            // get typed FORMAT values as array (one per sample)
+variant.sample(name)           // get all FORMAT fields for a single sample as object
+variant.samples()              // get all FORMAT fields for all samples as array of objects
+variant.samples(['S1', 'S2'])  // get FORMAT fields for a subset of samples
+
+// Serialization
+variant.toString()             // format record as VCF line (without newline)
+```
+
+### General Usage
 
 The following globals are available to the expression:
 
@@ -102,36 +214,6 @@ if (r.hasIndex()) {
   - `header.addInfo(id, number, type, description)`
   - `header.addFormat(id, number, type, description)`
 - `variant`: a VCF/BCF record with fields and methods
-
-### Variant Attributes
-
-```javascript
-// Core fields (read-only)
-variant.chrom   // string - chromosome/contig name
-variant.pos     // number - 1-based position (VCF POS column)
-variant.start   // number - 0-based start coordinate
-variant.stop    // number - end position
-variant.ref     // string - reference allele
-variant.alt     // string[] - array of alternate alleles
-
-// Writable fields
-variant.id      // string - variant ID (writable)
-variant.qual    // number | null - quality score (writable, set null to clear)
-variant.filter  // string[] - array of filter IDs (writable)
-
-// INFO field access
-variant.info(tag)              // get typed INFO value (uses header for type info)
-variant.set_info(tag, value)   // set INFO value (null/undefined clears the tag)
-
-// FORMAT/genotype field access
-variant.format(tag)            // get typed FORMAT values as array (one per sample)
-variant.sample(name)           // get all FORMAT fields for a single sample as object
-variant.samples()              // get all FORMAT fields for all samples as array of objects
-variant.samples(['S1', 'S2'])  // get FORMAT fields for a subset of samples
-
-// Serialization
-variant.toString()             // format record as VCF line (without newline)
-```
 
 ### Variant Examples
 
@@ -192,3 +274,15 @@ variant.toString()           // "chr1\t1000\t.\tA\tC\t30\tPASS\tDP=10\t..."
 - V8 initialization is global-process state; the library uses a global lock to
   serialize access for safety.
 - This is currently oriented around evaluating an expression per record.
+
+## Testing
+
+Run tests with:
+
+```bash
+cargo test -p htsvcf
+```
+
+**Note:** You may see messages like `<unknown>:5: Uncaught SyntaxError: Unexpected identifier 'is'`
+during test runs. This is expected—it comes from V8 printing to stderr when the
+`test_compile_error` test intentionally compiles invalid JavaScript to verify error handling.
