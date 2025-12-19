@@ -50,6 +50,11 @@ use crate::runtime;
 use crate::variant::{create_object_template, create_variant_object, Variant};
 
 /// Maximum number of unique expressions that can be cached.
+// TODO: Consider adding methods to manage the expression cache more flexibly:
+//       - `clear_cache()` to remove all cached expressions
+//       - `remove_expression(&str)` to remove a specific cached expression
+//       - Replace HashMap with an LRU cache to automatically evict least-recently-used
+//         expressions when the limit is reached, instead of returning CacheFull error
 const MAX_CACHED_EXPRESSIONS: usize = 8192;
 
 /// Errors that can occur during JavaScript evaluation.
