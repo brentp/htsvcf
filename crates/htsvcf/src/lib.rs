@@ -5,10 +5,12 @@
 //!
 //! # Overview
 //!
-//! The simplest entrypoint is [`runner::run_vcf_expr_with`], which iterates
-//! records in a VCF/BCF file and evaluates a JavaScript expression for each.
-//! It may be prferable to use the [`evaluator::Evaluator`] class which allows directly
-//! applying a single expression to each variant. It supports a generic return type.
+//! The recommended way to use this library is via the [`Evaluator`] struct, which
+//! compiles a JavaScript expression once and efficiently evaluates it against
+//! multiple VCF records. It supports generic return types for type-safe extraction.
+//!
+//! For simpler use cases, [`runner::run_vcf_expr_with`] provides a callback-based
+//! API that handles file iteration for you.
 //!
 //! # CLI Example
 //!
@@ -26,18 +28,21 @@
 //! # Library Example
 //!
 //! ```no_run
-//! use htsvcf::runner::{run_vcf_expr_with, RunOptions};
+//! use htsvcf::Evaluator;
+//! use rust_htslib::bcf::{self, Read};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//!     run_vcf_expr_with(
-//!         "input.vcf.gz",
-//!         "variant.chrom + ':' + variant.pos",
-//!         RunOptions::default(),
-//!         |line| {
-//!             println!("{}", line);
-//!             Ok(())
-//!         },
-//!     )
+//!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+//!     let mut dp_eval = Evaluator::new(reader.header(), "variant.info('DP')")?;
+//!     let mut af_eval = Evaluator::new(reader.header(), "variant.info('AF')")?;
+//!
+//!     for result in reader.records() {
+//!         let record = result?;
+//!         let dp: i32 = dp_eval.eval(record.clone())?;
+//!         let af: Vec<f32> = af_eval.eval(record)?;
+//!         println!("DP = {}, AF = {:?}", dp, af);
+//!     }
+//!     Ok(())
 //! }
 //! ```
 //!

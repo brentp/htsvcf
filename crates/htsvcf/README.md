@@ -20,7 +20,7 @@ Examples:
 
 The CLI prints the expression result (stringified) once per record.
 
-## Library
+## Library Example
 
 Add to your `Cargo.toml`:
 
@@ -28,8 +28,6 @@ Add to your `Cargo.toml`:
 [dependencies]
 htsvcf = { git = "https://github.com/brentp/htsvcf", package = "htsvcf" }
 ```
-
-### Evaluator API
 
 The `Evaluator` struct lets you iterate over VCF records in Rust while applying
 user-defined JavaScript expressions. The generic `eval::<T>()` method converts
@@ -51,6 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 ```
+
+### Evaluator API
 
 #### Supported Types
 
