@@ -285,10 +285,20 @@ impl Evaluator {
         let code = v8::String::new(scope, js_expr)
             .ok_or_else(|| EvalError::V8Setup("failed to create script string".into()))?;
 
-        let compiled = v8::Script::compile(scope, code, None)
-            .ok_or_else(|| EvalError::CompileError(format!("failed to compile: {}", js_expr)))?;
+        v8::tc_scope!(tc_scope, scope);
+        let compiled = match v8::Script::compile(tc_scope, code, None) {
+            Some(script) => script,
+            None => {
+                let msg = tc_scope
+                    .exception()
+                    .and_then(|e| e.to_string(tc_scope))
+                    .map(|s| s.to_rust_string_lossy(tc_scope))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                return Err(EvalError::CompileError(msg));
+            }
+        };
 
-        let script = v8::Global::new(scope, compiled);
+        let script = v8::Global::new(tc_scope, compiled);
         self.scripts.insert(js_expr.to_string(), script.clone());
 
         Ok(script)
@@ -515,11 +525,21 @@ impl Evaluator {
         let code = v8::String::new(scope, script)
             .ok_or_else(|| EvalError::V8Setup("failed to create script string".into()))?;
 
-        let compiled = v8::Script::compile(scope, code, None)
-            .ok_or_else(|| EvalError::CompileError(format!("failed to compile: {}", script)))?;
+        v8::tc_scope!(tc_scope, scope);
+        let compiled = match v8::Script::compile(tc_scope, code, None) {
+            Some(s) => s,
+            None => {
+                let msg = tc_scope
+                    .exception()
+                    .and_then(|e| e.to_string(tc_scope))
+                    .map(|s| s.to_rust_string_lossy(tc_scope))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                return Err(EvalError::CompileError(msg));
+            }
+        };
 
         compiled
-            .run(scope)
+            .run(tc_scope)
             .ok_or_else(|| EvalError::RuntimeError("script execution failed".into()))?;
 
         Ok(())
@@ -928,7 +948,14 @@ mod tests {
             js_eval.eval("this is not valid javascript {{{{");
         assert!(result.is_err());
         match result {
-            Err(EvalError::CompileError(_)) => {}
+            Err(EvalError::CompileError(msg)) => {
+                // Verify the error message contains v8's syntax error details
+                assert!(
+                    msg.contains("SyntaxError"),
+                    "expected SyntaxError in message: {}",
+                    msg
+                );
+            }
             _ => panic!("expected CompileError"),
         }
     }
@@ -1413,7 +1440,14 @@ mod tests {
         let result = js_eval.add_script("function invalid syntax {{{{");
         assert!(result.is_err());
         match result {
-            Err(EvalError::CompileError(_)) => {}
+            Err(EvalError::CompileError(msg)) => {
+                // Verify the error message contains v8's syntax error details
+                assert!(
+                    msg.contains("SyntaxError"),
+                    "expected SyntaxError in message: {}",
+                    msg
+                );
+            }
             _ => panic!("expected CompileError"),
         }
     }
