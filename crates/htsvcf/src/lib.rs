@@ -5,8 +5,10 @@
 //!
 //! # Overview
 //!
-//! The primary entrypoint is [`runner::run_vcf_expr_with`], which iterates
+//! The simplest entrypoint is [`runner::run_vcf_expr_with`], which iterates
 //! records in a VCF/BCF file and evaluates a JavaScript expression for each.
+//! It may be prferable to use the [`evaluator::Evaluator`] class which allows directly
+//! applying a single expression to each variant. It supports a generic return type.
 //!
 //! # CLI Example
 //!
