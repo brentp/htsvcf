@@ -15,7 +15,8 @@ import { Reader } from "htsvcf";
 
 const reader = new Reader("path/to/file.vcf.gz");
 
-for await (const variant of reader) {
+// Fast sync iteration
+for (const variant of reader) {
   console.log(variant.chrom, variant.pos, variant.ref, variant.alt);
 }
 
@@ -40,7 +41,22 @@ const reader = await openReader("path/to/file.vcf.gz");
 
 #### Iterating Records
 
-Use `for await...of` to iterate through all variants:
+There are two iteration modes:
+
+- **Fast synchronous iteration** (recommended for max throughput): `for...of`
+- **Asynchronous iteration** (doesn’t block the event loop): `for await...of`
+
+##### Fast synchronous iteration (recommended)
+
+This uses `nextSync()` under the hood and avoids per-record Promise/task overhead.
+
+```javascript
+for (const variant of reader) {
+  console.log(`${variant.chrom}:${variant.pos} ${variant.ref}>${variant.alt.join(",")}`);
+}
+```
+
+##### Asynchronous iteration
 
 ```javascript
 for await (const variant of reader) {
@@ -48,7 +64,7 @@ for await (const variant of reader) {
 }
 ```
 
-Or use synchronous iteration with `nextSync()`:
+##### Manual synchronous iteration
 
 ```javascript
 let result;

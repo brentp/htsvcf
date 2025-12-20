@@ -51,6 +51,19 @@ test("nextSync returns IteratorResult with Variant", () => {
   reader.close();
 });
 
+test("Reader supports sync for...of iteration", () => {
+  const reader = new Reader(vcfPath);
+
+  let n = 0;
+  for (const v of reader) {
+    n += 1;
+    assert.equal(typeof v.chrom, "string");
+  }
+
+  assert.ok(n > 0);
+  reader.close();
+});
+
 test("Variant.filter returns empty array for no filter", () => {
   const reader = new Reader(vcfPath);
   const rec = reader.nextSync();

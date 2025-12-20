@@ -59,6 +59,7 @@ export class Reader {
   query(chrom: string, start0: number, end0?: number): Promise<void>;
 
   [Symbol.asyncIterator](): AsyncIterator<Variant>;
+  [Symbol.iterator](): Iterator<Variant>;
   next(): Promise<IteratorResult<Variant>>;
   nextSync(): IteratorResult<Variant>;
 

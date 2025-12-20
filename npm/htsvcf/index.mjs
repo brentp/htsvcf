@@ -39,3 +39,19 @@ if (Reader && !Reader.prototype[Symbol.asyncIterator]) {
     return this;
   };
 }
+
+// Provide a fast synchronous iterator backed by nextSync().
+// This keeps async iteration available via Symbol.asyncIterator.
+if (Reader && !Reader.prototype[Symbol.iterator]) {
+  Reader.prototype[Symbol.iterator] = function () {
+    const reader = this;
+    return {
+      next() {
+        return reader.nextSync();
+      },
+      [Symbol.iterator]() {
+        return this;
+      },
+    };
+  };
+}
