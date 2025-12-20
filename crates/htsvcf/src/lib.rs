@@ -27,44 +27,48 @@
 //!
 //! # Library Example
 //!
-//! This example demonstrates the core API: reading VCF records, setting global
-//! variables with [`Evaluator::set`], defining functions with [`Evaluator::run`],
-//! evaluating expressions with [`Evaluator::eval`], retrieving values with
-//! [`Evaluator::get`], and writing filtered output.
+//! This example demonstrates the core API: reading VCF records, modifying the header
+//! to add a new INFO field, translating records to the updated header, computing and
+//! setting INFO values, and writing the modified output.
 //!
 //! ```no_run
 //! use htsvcf::Evaluator;
+//! use htsvcf_core::{open_writer, Header as CoreHeader, WriterOptions};
 //! use rust_htslib::bcf::{self, Read};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
-//!     let header = bcf::Header::from_template(reader.header());
-//!     let mut writer = bcf::Writer::from_path("output.vcf.gz", &header, true, bcf::Format::Vcf)?;
 //!     let mut eval = Evaluator::new(reader.header())?;
 //!
-//!     // Set global variables efficiently (no JS compilation overhead)
-//!     eval.set("min_dp", 10i32)?;
-//!     eval.set("min_qual", 20.0f64)?;
-//!     eval.set("target_chroms", vec!["chr1".to_string(), "chr2".to_string()])?;
+//!     // Add a new INFO field to the header via JavaScript
+//!     eval.run("header.addInfo('VARIANT_LENGTH', '1', 'Integer', 'Length of variant (REF - ALT)')")?;
 //!
-//!     // Define reusable filter functions with run()
-//!     eval.run("function passes(v) { return v.info('DP') >= min_dp && v.qual >= min_qual }")?;
-//!     eval.run("function onTarget(v) { return target_chroms.includes(v.chrom) }")?;
+//!     // Get the updated header for the writer
+//!     let updated_header = eval.header()?;
+//!
+//!     // Open writer with the modified header using htsvcf_core
+//!     let core_header = unsafe { CoreHeader::new(updated_header.inner) };
+//!     let mut writer = open_writer("output.vcf.gz", &core_header, WriterOptions::default())?;
+//!
+//!     // Define a filter function
+//!     eval.run("function passes(v) { return v.info('DP') >= 10 && v.qual >= 20 }")?;
 //!
 //!     let mut count = 0usize;
-//!     for (i, result) in reader.records().enumerate() {
-//!         let record = result?;
+//!     for result in reader.records() {
+//!         let mut record = result?;
+//!
+//!         // Translate the record to the updated header (required after adding INFO fields)
+//!         record.translate(&mut eval.header()?)?;
 //!         eval.set_record(record);
 //!
-//!         // Update loop index in JS (useful for expressions that need it)
-//!         eval.set("i", i)?;
+//!         // Compute variant length and set the new INFO field via JavaScript
+//!         eval.run("variant.set_info('VARIANT_LENGTH', variant.ref.length - (variant.alt[0]?.length || 0))")?;
 //!
-//!         // Expressions are compiled once and cached
-//!         let dominated: bool = eval.eval("passes(variant) && onTarget(variant)")?;
-//!         if dominated {
+//!         let passes: bool = eval.eval("passes(variant)")?;
+//!         if passes {
 //!             count += 1;
-//!             let record = eval.take().unwrap();
-//!             writer.write(&record)?;
+//!             let mut record = eval.take().unwrap();
+//!             writer.write_record(&mut record)?;
 //!         }
 //!     }
 //!

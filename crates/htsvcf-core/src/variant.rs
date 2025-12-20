@@ -550,6 +550,14 @@ impl Variant {
     self.record
   }
 
+  /// Get a mutable reference to the underlying `bcf::Record`.
+  ///
+  /// This is useful for passing the record to functions that need `&mut bcf::Record`,
+  /// such as [`Writer::write_record`](crate::Writer::write_record).
+  pub fn record_mut(&mut self) -> &mut bcf::Record {
+    &mut self.record
+  }
+
   /// Get the chromosome/contig name (CHROM column).
   pub fn chrom(&self) -> &str {
     &self.chrom
