@@ -12,18 +12,29 @@
 //! - [`Header`] - Access VCF header metadata (INFO/FORMAT definitions, samples)
 //! - [`Variant`] - A single VCF record with typed accessors for all fields
 //!
-//! # Example: Reading a VCF file
+//! # Example: Reading, modifying, and writing a VCF
 //!
 //! ```no_run
-//! use htsvcf_core::{open_reader, Header, Variant};
+//! use htsvcf_core::{open_reader, open_writer, Header, Variant, WriterOptions};
 //!
+//! // Open input VCF and get a copy of its header
 //! let mut reader = open_reader("input.vcf.gz").expect("failed to open");
 //! let header = unsafe { Header::new(reader.header_ptr()) };
 //!
-//! while let Ok(Some(record)) = reader.next_record() {
-//!     let variant = Variant::from_record(record);
+//! // Add a new INFO field to the header
+//! header.add_info("VARIANT_LENGTH", "1", "Integer", "Length of variant (REF - ALT)");
 //!
-//!     // Basic fields
+//! // Open writer with the modified header
+//! let mut writer = open_writer("output.vcf.gz", &header, WriterOptions::default())
+//!     .expect("failed to create writer");
+//!
+//! while let Ok(Some(record)) = reader.next_record() {
+//!     let mut variant = Variant::from_record(record);
+//!
+//!     // Translate the record to the new header (required after adding INFO fields)
+//!     variant.translate(&header).expect("translate failed");
+//!
+//!     // Access basic fields
 //!     println!("{}:{} {} -> {:?}",
 //!         variant.chrom(),
 //!         variant.pos(),      // 1-based position
@@ -31,18 +42,13 @@
 //!         variant.alts()
 //!     );
 //!
-//!     // INFO fields (typed by header)
-//!     match variant.info(&header, "DP") {
-//!         htsvcf_core::InfoValue::Int(dp) => println!("  DP={}", dp),
-//!         htsvcf_core::InfoValue::Array(vals) => println!("  DP={:?}", vals),
-//!         _ => {}
-//!     }
+//!     // Compute and set the new INFO field
+//!     let ref_len = variant.reference().len() as i32;
+//!     let alt_len = variant.alts().first().map(|a| a.len() as i32).unwrap_or(0);
+//!     variant.set_info_integer(&header, "VARIANT_LENGTH", &[ref_len - alt_len]).unwrap();
 //!
-//!     // FORMAT fields (per-sample)
-//!     // variant.format(&header, "GT") returns FormatValue::PerSample(...)
-//!     if let htsvcf_core::FormatValue::PerSample(gts) = variant.format(&header, "GT") {
-//!         println!("  Genotypes: {:?}", gts);
-//!     }
+//!     // Write the modified record
+//!     writer.write_record(variant.record_mut()).expect("write failed");
 //! }
 //! ```
 //!
