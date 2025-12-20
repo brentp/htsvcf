@@ -46,9 +46,9 @@ struct Args {
     #[argh(positional, default = "String::from(\"variant.start\")")]
     js_expr: String,
 
-    /// optional JavaScript file to run once before processing records
+    /// optional JavaScript file to run before processing records
     ///
-    /// May define helper functions and/or modify the header (e.g. `header.addInfo(...)`).
+    /// define functions and/or mod header (`header.addInfo(..)`).
     #[argh(option)]
     prelude: Option<String>,
 
@@ -70,13 +70,15 @@ fn main() -> Result<(), AnyError> {
     let mut writer = BufWriter::new(stdout);
 
     let mut record = reader.empty_record();
+    let mut i = 0;
     while let Some(result) = reader.read(&mut record) {
         result?;
+        i += 1;
 
         if let Some(ref mut header) = updated_header {
             record.translate(header)?;
         }
-
+        evaluator.set("i", i)?;
         evaluator.set_record(record);
         let output: String = evaluator.eval(&args.js_expr)?;
         writeln!(writer, "{output}")?;
