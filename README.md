@@ -42,6 +42,12 @@ for result in reader.records() {
         // write record to output, collect it, etc.
     }
 }
+
+// If you mutate the header via JS (e.g. header.addInfo), call eval.header()
+// to retrieve the updated HeaderView, and translate each record to it:
+//   eval.run("header.addInfo('NEW','1','Integer','desc')")?;
+//   let mut hdr = eval.header()?;
+//   record.translate(&mut hdr)?;
 ```
 
 ## crates/htsvcf-napi + npm/htsvcf (Node.js/Bun)

@@ -41,6 +41,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rust_htslib::bcf;
 
@@ -211,6 +212,35 @@ impl Evaluator {
             header_obj,
         })
     }
+
+    /// Get a copy of the evaluator's current header.
+    ///
+    /// This reflects any mutations performed via JavaScript (e.g. `header.addInfo(...)`).
+    /// The returned header can be used with `record.translate(&mut header)`.
+    pub fn header(&mut self) -> Result<Arc<bcf::header::HeaderView>, EvalError> {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let header_obj = v8::Local::new(scope, &self.header_obj);
+        let wrapper = unsafe {
+            v8::Object::unwrap::<{ crate::header::HEADER_TAG }, crate::header::Header>(
+                scope, header_obj,
+            )
+        }
+        .ok_or_else(|| EvalError::V8Setup("failed to unwrap header object".into()))?;
+        let header = unsafe { wrapper.as_ref() };
+
+        let dup = unsafe { rust_htslib::htslib::bcf_hdr_dup(header.inner().inner_ptr()) };
+        if dup.is_null() {
+            return Err(EvalError::V8Setup("failed to duplicate header".into()));
+        }
+
+        Ok(Arc::new(bcf::header::HeaderView::new(dup)))
+    }
+
 
     /// Set the current record for evaluation.
     ///
@@ -632,6 +662,29 @@ mod tests {
         js_eval.set_record(record);
         let result: String = js_eval.eval("variant.chrom + ':' + variant.pos").unwrap();
         assert_eq!(result, "chr1:1000");
+    }
+
+    #[test]
+    fn test_eval_header_add_info_translate_set_info() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut ev = Evaluator::new(reader.header()).unwrap();
+
+        ev.run("header.addInfo('NEW_FIELD','1','Integer','test field')")
+            .unwrap();
+        let mut header = ev.header().unwrap();
+
+        let mut record = reader.records().next().unwrap().unwrap();
+        record.translate(&mut header).unwrap();
+
+        ev.set_record(record);
+        ev.run("variant.set_info('NEW_FIELD', 32)").unwrap();
+
+        let vcf_line: String = ev.eval("variant.toString()").unwrap();
+        assert!(vcf_line.contains("NEW_FIELD=32"));
+
+        let record = ev.take().unwrap();
+        assert!(record.to_vcf_string().unwrap().contains("NEW_FIELD=32"));
     }
 
     #[test]

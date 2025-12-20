@@ -241,6 +241,46 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
+#### Updating the Header at Runtime
+
+If you add new INFO/FORMAT definitions from JavaScript (e.g. `header.addInfo(...)`),
+use `Evaluator::header()` to retrieve the updated header from the JS runtime.
+
+If you also need Rust-side formatting (e.g. `record.to_vcf_string()`) or other
+header-dependent operations to see those new definitions, translate each record to
+the updated header:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut eval = Evaluator::new(reader.header())?;
+
+    // Define a new INFO field inside the JS runtime
+    eval.run("header.addInfo('NEW_FIELD', '1', 'Integer', 'Example field')")?;
+
+    // Fetch the updated header (includes NEW_FIELD)
+    let mut updated_header = eval.header()?;
+
+    for result in reader.records() {
+        let mut record = result?;
+
+        // Important: associate the record with the updated header
+        record.translate(&mut updated_header)?;
+
+        eval.set_record(record);
+        eval.run("variant.set_info('NEW_FIELD', 32)")?;
+
+        let record = eval.take().unwrap();
+        assert!(record.to_vcf_string()?.contains("NEW_FIELD=32"));
+    }
+
+    Ok(())
+}
+```
+
 Scripts are executed immediately when added, so you can define functions, constants,
 or run any initialization code. All definitions persist across records.
 

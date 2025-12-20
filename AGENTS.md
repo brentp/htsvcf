@@ -11,6 +11,9 @@ When adding or changing any public API (Reader/Header/Variant/etc.),
 Attempt to **minimize code duplication** by sharing methods written in the core.
 do **all** of the following:
 
+0. **Consider any performance implications**
+   - look for deep copies or inefficient code and make a large NOTE or request feedback
+
 1. **Implement in the v8 binding**
    - Update the v8-side implementation in `crates/htsvcf/src/*`.
    - Ensure the JS-visible names match the existing API surface (e.g. `hasIndex`, iterator protocol, etc.).
