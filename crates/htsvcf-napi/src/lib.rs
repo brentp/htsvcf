@@ -202,10 +202,24 @@ use napi_derive::napi;
 #[napi(object)]
 pub struct ReaderOptions {}
 
+#[napi(object)]
+pub struct WriterOptions {
+  pub format: Option<String>,
+  pub uncompressed: Option<bool>,
+  pub threads: Option<u32>,
+}
+
 #[napi]
 pub struct Reader {
   inner: Arc<Mutex<Option<core::Reader>>>,
   header: Arc<core::Header>,
+  /// Stored N-API reference so that `reader.header` always returns the same JS object.
+  /// Without this, each call to the getter would create a new JS wrapper, breaking
+  /// identity checks (`reader.header === reader.header`) and allowing mutations to
+  /// be lost if the user modifies one instance but reads from another.
+  ///
+  /// TODO: If we make Header immutable (mutations return a new Header), we could
+  /// remove this field and create a fresh wrapper on each access.
   header_ref: Reference<Header>,
 }
 
@@ -290,7 +304,7 @@ impl Reader {
         out.set_named_property(
           "value",
           Variant {
-            inner: variant,
+            inner: Some(variant),
             header: self.header.clone(),
           },
         )?;
@@ -311,6 +325,96 @@ impl Reader {
 #[napi]
 pub fn open_reader(path: String, opts: Option<ReaderOptions>) -> AsyncTask<OpenReaderTask> {
   AsyncTask::new(OpenReaderTask { path, opts })
+}
+
+#[napi]
+pub struct Writer {
+  inner: Arc<Mutex<Option<core::Writer>>>,
+  /// Stored N-API reference so that `writer.header` always returns the same JS object.
+  /// Without this, each call to the getter would create a new JS wrapper, breaking
+  /// identity checks (`writer.header === writer.header`) and allowing mutations to
+  /// be lost if the user modifies one instance but reads from another.
+  ///
+  /// TODO: If we make Header immutable (mutations return a new Header), we could
+  /// remove this field and create a fresh wrapper on each access.
+  header_ref: Reference<Header>,
+}
+
+#[napi]
+impl Writer {
+  #[napi(constructor)]
+  pub fn new(env: Env, path: String, header: &Header, opts: Option<WriterOptions>) -> napi::Result<Self> {
+    let mut options = core::WriterOptions::default();
+
+    if let Some(opts) = opts {
+      if let Some(format) = opts.format {
+        options.format = match format.as_str() {
+          "vcf" => Some(core::OutputFormat::Vcf),
+          "bcf" => Some(core::OutputFormat::Bcf),
+          _ => {
+            return Err(Error::new(
+              Status::InvalidArg,
+              "WriterOptions.format must be 'vcf' or 'bcf'",
+            ))
+          }
+        };
+      }
+      if let Some(uncompressed) = opts.uncompressed {
+        options.uncompressed = uncompressed;
+      }
+      if let Some(threads) = opts.threads {
+        options.threads = Some(threads as usize);
+      }
+    }
+
+    let writer = core::open_writer(&path, header.inner.as_ref(), options)
+      .map_err(|e| Error::new(Status::GenericFailure, format!("failed to open writer: {e}")))?;
+
+    let header_ref = Header::into_reference(Header { inner: header.inner.clone() }, env)?;
+
+    Ok(Self {
+      inner: Arc::new(Mutex::new(Some(writer))),
+      header_ref,
+    })
+  }
+
+  #[napi(getter)]
+  pub fn header(&self, env: Env) -> napi::Result<Reference<Header>> {
+    self.header_ref.clone(env)
+  }
+
+  #[napi]
+  pub fn write(&self, variant: &mut Variant) -> napi::Result<()> {
+    let mut writer_guard = self
+      .inner
+      .lock()
+      .map_err(|_| Error::new(Status::GenericFailure, "writer lock poisoned"))?;
+    let writer = writer_guard
+      .as_mut()
+      .ok_or_else(|| Error::new(Status::GenericFailure, "writer is closed"))?;
+
+    // Keep the header alive while writing.
+    // Required because records translated to a new header may hold raw pointers
+    // into that header.
+    let _header_keepalive = variant.header.clone();
+
+    let mut record = variant
+      .inner
+      .take()
+      .ok_or_else(|| Error::new(Status::GenericFailure, "variant was consumed"))?
+      .into_record();
+
+    writer
+      .write_record(&mut record)
+      .map_err(|e| Error::new(Status::GenericFailure, format!("write failed: {e}")))
+  }
+
+  #[napi]
+  pub fn close(&self) {
+    if let Ok(mut guard) = self.inner.lock() {
+      let _ = guard.take();
+    }
+  }
 }
 
 pub struct OpenReaderTask {
@@ -421,7 +525,7 @@ impl Task for NextTask {
         out.set_named_property(
           "value",
           Variant {
-            inner: variant,
+            inner: Some(variant),
             header: self.header.clone(),
           },
         )?;
@@ -434,79 +538,94 @@ impl Task for NextTask {
 
 #[napi]
 pub struct Variant {
-  inner: core::Variant,
+  pub(crate) inner: Option<core::Variant>,
   header: Arc<core::Header>,
 }
 
 #[napi]
 impl Variant {
-  #[napi(getter)]
-  pub fn chrom(&self) -> String {
-    self.inner.chrom().to_string()
+  fn variant(&self) -> napi::Result<&core::Variant> {
+    self
+      .inner
+      .as_ref()
+      .ok_or_else(|| Error::new(Status::GenericFailure, "variant was consumed"))
+  }
+
+  fn variant_mut(&mut self) -> napi::Result<&mut core::Variant> {
+    self
+      .inner
+      .as_mut()
+      .ok_or_else(|| Error::new(Status::GenericFailure, "variant was consumed"))
   }
 
   #[napi(getter)]
-  pub fn rid(&self) -> Option<u32> {
-    self.inner.rid()
+  pub fn chrom(&self) -> napi::Result<String> {
+    Ok(self.variant()?.chrom().to_string())
   }
 
   #[napi(getter)]
-  pub fn pos(&self) -> i64 {
-    self.inner.pos()
+  pub fn rid(&self) -> napi::Result<Option<u32>> {
+    Ok(self.variant()?.rid())
   }
 
   #[napi(getter)]
-  pub fn start(&self) -> i64 {
-    self.inner.start()
+  pub fn pos(&self) -> napi::Result<i64> {
+    Ok(self.variant()?.pos())
+  }
+
+  #[napi(getter)]
+  pub fn start(&self) -> napi::Result<i64> {
+    Ok(self.variant()?.start())
   }
 
   #[napi(getter, js_name = "stop")]
-  pub fn stop(&self) -> i64 {
-    self.inner.end()
+  pub fn stop(&self) -> napi::Result<i64> {
+    Ok(self.variant()?.end())
   }
 
   #[napi(getter)]
-  pub fn id(&self) -> String {
-    self.inner.id()
+  pub fn id(&self) -> napi::Result<String> {
+    Ok(self.variant()?.id())
   }
 
   #[napi(setter)]
   pub fn set_id(&mut self, id: String) -> napi::Result<()> {
     self
-      .inner
+      .variant_mut()?
       .set_id(&id)
       .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set id: {e}")))
   }
 
   #[napi(getter, js_name = "ref")]
-  pub fn reference(&self) -> String {
-    self.inner.reference()
+  pub fn reference(&self) -> napi::Result<String> {
+    Ok(self.variant()?.reference())
   }
 
   #[napi(getter)]
-  pub fn alt(&self) -> Vec<String> {
-    self.inner.alts()
+  pub fn alt(&self) -> napi::Result<Vec<String>> {
+    Ok(self.variant()?.alts())
   }
 
   #[napi(getter)]
-  pub fn qual(&self) -> Option<f64> {
-    self.inner.qual().map(|v| v as f64)
+  pub fn qual(&self) -> napi::Result<Option<f64>> {
+    Ok(self.variant()?.qual().map(|v| v as f64))
   }
 
   #[napi(setter)]
-  pub fn set_qual(&mut self, qual: Option<f64>) {
-    self.inner.set_qual(qual.map(|v| v as f32))
+  pub fn set_qual(&mut self, qual: Option<f64>) -> napi::Result<()> {
+    self.variant_mut()?.set_qual(qual.map(|v| v as f32));
+    Ok(())
   }
 
   #[napi(getter)]
-  pub fn filter(&self) -> Vec<String> {
-    self.inner.filters()
+  pub fn filter(&self) -> napi::Result<Vec<String>> {
+    Ok(self.variant()?.filters())
   }
 
   #[napi(setter)]
   pub fn set_filter(&mut self, filter: Vec<String>) -> napi::Result<()> {
     self
-      .inner
+      .variant_mut()?
       .set_filters(&filter)
       .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set filter: {e}")))
   }
@@ -514,26 +633,26 @@ impl Variant {
   #[napi(js_name = "toString")]
   pub fn to_string(&self) -> napi::Result<String> {
     self
-      .inner
+      .variant()?
       .to_string(&self.header)
       .ok_or_else(|| Error::new(Status::GenericFailure, "failed to format record"))
   }
 
   #[napi]
   pub fn info(&self, env: Env, tag: String) -> napi::Result<sys::napi_value> {
-    let v = self.inner.info(&self.header, &tag);
+    let v = self.variant()?.info(&self.header, &tag);
     infovalue_to_napi_value(&env, &v)
   }
 
   #[napi]
   pub fn format(&self, env: Env, tag: String) -> napi::Result<sys::napi_value> {
-    let v = self.inner.format(&self.header, &tag);
+    let v = self.variant()?.format(&self.header, &tag);
     formatvalue_to_napi_value(&env, &v)
   }
 
   #[napi]
   pub fn sample(&self, env: Env, name: String) -> napi::Result<sys::napi_value> {
-    let Some(fields) = self.inner.sample(&self.header, &name) else {
+    let Some(fields) = self.variant()?.sample(&self.header, &name) else {
       return unsafe { ToNapiValue::to_napi_value(env.raw(), ()) };
     };
 
@@ -549,7 +668,7 @@ impl Variant {
   #[napi]
   pub fn samples(&self, env: Env, subset: Option<Vec<String>>) -> napi::Result<sys::napi_value> {
     let subset_refs: Option<Vec<&str>> = subset.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
-    let all_samples = self.inner.samples(&self.header, subset_refs.as_deref());
+    let all_samples = self.variant()?.samples(&self.header, subset_refs.as_deref());
 
     let mut arr_items: Vec<sys::napi_value> = Vec::with_capacity(all_samples.len());
 
@@ -566,12 +685,24 @@ impl Variant {
     Ok(arr.raw())
   }
 
+  #[napi]
+  pub fn translate(&mut self, header: &Header) -> napi::Result<()> {
+    self.header = header.inner.clone();
+
+    self
+      .variant_mut()?
+      .translate(&header.inner)
+      .map_err(|e| Error::new(Status::GenericFailure, format!("translate failed: {e}")))
+  }
+
   #[napi(js_name = "set_info")]
   pub fn set_info(&mut self, tag: String, value: Unknown) -> napi::Result<()> {
     use napi::ValueType;
     use rust_htslib::bcf::header::TagType;
 
-    let Some((tag_type, _tag_length)) = self.header.info_type(tag.as_bytes()) else {
+    let header = self.header.clone();
+
+    let Some((tag_type, _tag_length)) = header.info_type(tag.as_bytes()) else {
       return Err(Error::new(
         Status::InvalidArg,
         format!("undefined INFO tag: {tag}"),
@@ -580,8 +711,9 @@ impl Variant {
 
     match value.get_type()? {
       ValueType::Null | ValueType::Undefined => {
-        self.inner
-          .clear_info(&self.header, &tag)
+        self
+          .variant_mut()?
+          .clear_info(&header, &tag)
           .map_err(|e| Error::new(Status::GenericFailure, format!("failed to clear info {tag}: {e}")))?;
         return Ok(());
       }
@@ -605,8 +737,9 @@ impl Variant {
         }
 
         let is_set: bool = unsafe { value.cast()? };
-        self.inner
-          .set_info_flag(&self.header, &tag, is_set)
+        self
+          .variant_mut()?
+          .set_info_flag(&header, &tag, is_set)
           .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
       }
       TagType::Integer => {
@@ -631,8 +764,9 @@ impl Variant {
           out.push(n as i32);
         }
 
-        self.inner
-          .set_info_integer(&self.header, &tag, &out)
+        self
+          .variant_mut()?
+          .set_info_integer(&header, &tag, &out)
           .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
       }
       TagType::Float => {
@@ -645,14 +779,16 @@ impl Variant {
           out.push(n as f32);
         }
 
-        self.inner
-          .set_info_float(&self.header, &tag, &out)
+        self
+          .variant_mut()?
+          .set_info_float(&header, &tag, &out)
           .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
       }
       TagType::String => {
         let values: Vec<String> = unknown_to_strings(&tag, value)?;
-        self.inner
-          .set_info_string(&self.header, &tag, &values)
+        self
+          .variant_mut()?
+          .set_info_string(&header, &tag, &values)
           .map_err(|e| Error::new(Status::GenericFailure, format!("failed to set info {tag}: {e}")))?;
       }
     }
@@ -723,7 +859,7 @@ fn unknown_to_string(tag: &str, value: Unknown) -> napi::Result<String> {
 
 #[napi]
 pub struct Header {
-  inner: Arc<core::Header>,
+  pub(crate) inner: Arc<core::Header>,
 }
 
 #[napi]

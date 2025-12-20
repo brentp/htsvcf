@@ -323,6 +323,10 @@ pub fn create_object_template<'a>(
     let set_info_template = v8::FunctionTemplate::new(scope, set_info_fn);
     object_template.set(set_info_key.into(), set_info_template.into());
 
+    let translate_key = v8::String::new(scope, "translate").unwrap();
+    let translate_template = v8::FunctionTemplate::new(scope, translate_fn);
+    object_template.set(translate_key.into(), translate_template.into());
+
     let format_key = v8::String::new(scope, "format").unwrap();
     let format_template = v8::FunctionTemplate::new(scope, format_fn);
     object_template.set(format_key.into(), format_template.into());
@@ -503,10 +507,64 @@ fn attr_setter(
 /// V8 callback for `variant.info(tag)`.
 ///
 /// Uses the JS `header` object to resolve the tag's type and cardinality.
+fn translate_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let type_error = |scope: &mut v8::PinScope<'_, '_>, msg: &str| {
+        let msg = v8::String::new(scope, msg).unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+    };
+    let error = |scope: &mut v8::PinScope<'_, '_>, msg: &str| {
+        let msg = v8::String::new(scope, msg).unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+    };
+
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    if args.length() != 1 {
+        type_error(scope, "variant.translate(header) requires 1 argument");
+        return;
+    }
+
+    let header_arg = args.get(0);
+    let Ok(header_obj) = v8::Local::<v8::Object>::try_from(header_arg) else {
+        type_error(scope, "variant.translate(header) expects a Header");
+        return;
+    };
+
+    let header_wrapper =
+        unsafe { v8::Object::unwrap::<{ header::HEADER_TAG }, header::Header>(scope, header_obj) };
+    let Some(header_wrapper) = header_wrapper else {
+        type_error(scope, "variant.translate(header) expects a Header");
+        return;
+    };
+    let header: &header::Header = unsafe { header_wrapper.as_ref() };
+
+    // Use the core Header's translation view to avoid header duplication.
+    // This view is intentionally non-dropping to prevent double-free.
+    let mut rust_header = header.inner().translate_view();
+
+    let record = variant.record_mut(scope);
+    if let Err(e) = record.translate(&mut rust_header) {
+        error(scope, &format!("translate failed: {e}"));
+        return;
+    }
+
+    // Only update JS-visible header after successful translation so future
+    // `set_info` uses the new schema. We do this after translate succeeds to
+    // keep the variant in a consistent state if translation fails.
+    this.set_internal_field(HEADER_INTERNAL_FIELD_INDEX, header_obj.into());
+}
+
 fn set_info_fn(
     scope: &mut v8::PinScope<'_, '_>,
     args: v8::FunctionCallbackArguments,
-    mut _rv: v8::ReturnValue,
+    _rv: v8::ReturnValue,
 ) {
     let this = args.this();
     let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }

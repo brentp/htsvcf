@@ -134,6 +134,33 @@ header.addFormat("GT", "1", "String", "Genotype");
 console.log(header.toString());
 ```
 
+### Writer
+
+Create a writer for VCF/BCF output:
+
+```javascript
+import { Reader, Writer } from "htsvcf";
+
+const reader = new Reader("input.vcf.gz");
+
+// If you plan to write new INFO/FORMAT tags, add them first
+reader.header.addInfo("ZZ", "1", "Integer", "Zed");
+
+const writer = new Writer("out.vcf", reader.header, {
+  // optional; inferred from path by default
+  format: "vcf",
+});
+
+for (const v of reader) {
+  v.set_info("ZZ", 42);
+  // NOTE: write() consumes the Variant
+  writer.write(v);
+}
+
+writer.close();
+reader.close();
+```
+
 ### Variant
 
 Each variant record has the following properties and methods:

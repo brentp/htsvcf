@@ -542,6 +542,14 @@ impl Variant {
     Self { record, chrom }
   }
 
+  /// Consume this Variant and return the underlying `bcf::Record`.
+  ///
+  /// This is primarily used by writer bindings so `write(variant)` can consume
+  /// a JS `Variant` without cloning.
+  pub fn into_record(self) -> bcf::Record {
+    self.record
+  }
+
   /// Get the chromosome/contig name (CHROM column).
   pub fn chrom(&self) -> &str {
     &self.chrom
@@ -742,6 +750,17 @@ impl Variant {
     self.record.push_info_string(tag.as_bytes(), &refs)?;
     self.record.unpack();
     Ok(())
+  }
+
+  /// Translate this record to a new header.
+  ///
+  /// This is required when you mutate the header (e.g. add a new INFO field)
+  /// and then want to set values for those new tags.
+  ///
+  /// IMPORTANT: this does not duplicate/copy the header.
+  pub fn translate(&mut self, header: &Header) -> Result<(), rust_htslib::errors::Error> {
+    let mut view = header.translate_view();
+    self.record.translate(&mut view)
   }
 
   /// Clear (remove) an INFO field from the record.

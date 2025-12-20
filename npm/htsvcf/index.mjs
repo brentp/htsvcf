@@ -32,7 +32,7 @@ try {
   native = require("./htsvcf.node");
 }
 
-export const { Reader, Header, Variant, openReader } = native;
+export const { Reader, Header, Variant, Writer, openReader } = native;
 
 if (Reader && !Reader.prototype[Symbol.asyncIterator]) {
   Reader.prototype[Symbol.asyncIterator] = function () {

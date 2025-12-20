@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 impl Drop for Header {
   fn drop(&mut self) {
@@ -69,6 +70,14 @@ pub struct Header {
   /// Cached map from tag ID to (name_string, name_bytes) for O(1) lookup.
   /// This covers both INFO and FORMAT tags since they share the ID namespace.
   id_to_name_cache: HashMap<u32, (String, Vec<u8>)>,
+
+  // Non-owning, process-lifetime HeaderView used for record translation.
+  //
+  // We cannot hand a record an `Arc<HeaderView>` that will run `bcf_hdr_destroy`
+  // on our `Header`'s `inner` pointer. To avoid duplicating the header for
+  // translation while also preventing a double-free, we create an `Arc<HeaderView>`
+  // whose `Drop` never runs by leaking it.
+  translate_view: OnceLock<Arc<rust_htslib::bcf::header::HeaderView>>,
 }
 
 /// Represents a field definition from the VCF header (INFO, FORMAT, or FILTER).
@@ -140,6 +149,7 @@ impl Header {
       sample_names,
       sample_name_to_idx,
       id_to_name_cache,
+      translate_view: OnceLock::new(),
     }
   }
 
@@ -153,6 +163,7 @@ impl Header {
       sample_names: Vec::new(),
       sample_name_to_idx: HashMap::new(),
       id_to_name_cache: HashMap::new(),
+      translate_view: OnceLock::new(),
     }
   }
 
@@ -163,6 +174,24 @@ impl Header {
   /// The returned pointer is valid for the lifetime of this `Header`.
   pub fn inner_ptr(&self) -> *mut rust_htslib::htslib::bcf_hdr_t {
     self.inner
+  }
+
+  pub fn translate_view(&self) -> Arc<rust_htslib::bcf::header::HeaderView> {
+    // Create a HeaderView that points at `self.inner` but never gets dropped.
+    //
+    // `bcf::Record` stores an `Arc<HeaderView>`. `HeaderView::Drop` destroys the
+    // underlying `bcf_hdr_t*`, which would double-free because `Header` also owns
+    // and destroys `self.inner`. To avoid duplicating the header for translation,
+    // we intentionally leak one strong ref to the `HeaderView` so its `Drop` never
+    // runs (the strong count never reaches zero).
+    self
+      .translate_view
+      .get_or_init(|| {
+        let view = Arc::new(rust_htslib::bcf::header::HeaderView::new(self.inner));
+        std::mem::forget(Arc::clone(&view)); // Leak one ref to prevent drop
+        view
+      })
+      .clone()
   }
 
   /// Get a temporary header view (internal use).

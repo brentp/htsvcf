@@ -33,6 +33,7 @@ use crate::header::{create_header_object, Header};
 use crate::runtime;
 use crate::variant::{create_object_template, create_variant_object, Variant};
 use crate::reader;
+use crate::writer;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -104,6 +105,11 @@ where
     let reader_ctor = reader::create_reader_constructor(scope);
     let reader_name = v8::String::new(scope, "Reader").expect("failed to allocate v8 string");
     global.set(scope, reader_name.into(), reader_ctor.into());
+
+    // Expose Writer(path, header) constructor.
+    let writer_ctor = writer::create_writer_constructor(scope);
+    let writer_name = v8::String::new(scope, "Writer").expect("failed to allocate v8 string");
+    global.set(scope, writer_name.into(), writer_ctor.into());
 
     let header_obj = global
         .get(scope, header_name.into())

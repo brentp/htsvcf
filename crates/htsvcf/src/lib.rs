@@ -115,6 +115,17 @@
 //! variant.toString()  // => Full VCF line (without newline)
 //! ```
 //!
+//! ## `Writer` - Write VCF/BCF files
+//!
+//! ```js
+//! const w = new Writer('out.vcf', header)
+//! for (const v of new Reader('in.vcf.gz')) {
+//!   // NOTE: write() consumes v
+//!   w.write(v)
+//! }
+//! w.close()
+//! ```
+//!
 //! ## `header` - VCF header metadata
 //!
 //! ```js
@@ -171,6 +182,7 @@ pub mod reader;
 pub mod runner;
 pub mod runtime;
 pub mod variant;
+pub mod writer;
 
 pub use evaluator::{EvalError, Evaluator};
 pub use fromjs::FromJsValue;
