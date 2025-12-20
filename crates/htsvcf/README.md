@@ -32,9 +32,9 @@ Add to your `Cargo.toml`:
 htsvcf = { git = "https://github.com/brentp/htsvcf", package = "htsvcf" }
 ```
 
-The `Evaluator` struct lets you iterate over VCF records in Rust while applying
-user-defined JavaScript expressions. The generic `eval::<T>()` method converts
-JavaScript results to Rust types:
+This example demonstrates the core API: reading VCF records, setting global
+variables with `set()`, defining functions with `run()`, evaluating expressions
+with `eval()`, retrieving values with `get()`, and writing filtered output.
 
 ```rust
 use htsvcf::Evaluator;
@@ -42,14 +42,37 @@ use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let header = bcf::Header::from_template(reader.header());
+    let mut writer = bcf::Writer::from_path("output.vcf.gz", &header, true, bcf::Format::Vcf)?;
     let mut eval = Evaluator::new(reader.header())?;
 
-    for result in reader.records() {
+    // Set global variables efficiently (no JS compilation overhead)
+    eval.set("min_dp", 10i32)?;
+    eval.set("min_qual", 20.0f64)?;
+    eval.set("target_chroms", vec!["chr1".to_string(), "chr2".to_string()])?;
+
+    // Define reusable filter functions with run()
+    eval.run("function passes(v) { return v.info('DP') >= min_dp && v.qual >= min_qual }")?;
+    eval.run("function onTarget(v) { return target_chroms.includes(v.chrom) }")?;
+
+    let mut count = 0usize;
+    for (i, result) in reader.records().enumerate() {
         let record = result?;
         eval.set_record(record);
-        let dp: i32 = eval.eval("variant.info('DP')")?;
-        println!("DP = {}", dp);
+
+        // Update loop index in JS (useful for expressions that need it)
+        eval.set("i", i)?;
+
+        // Expressions are compiled once and cached
+        let passes: bool = eval.eval("passes(variant) && onTarget(variant)")?;
+        if passes {
+            count += 1;
+            let record = eval.take().unwrap();
+            writer.write(&record)?;
+        }
     }
+
+    eprintln!("Wrote {} variants", count);
     Ok(())
 }
 ```
@@ -133,7 +156,7 @@ Use `eval::<bool>()` to filter variants:
 
 ```rust
 use htsvcf::Evaluator;
-use rust_htslib::bcf::{self, Read, Write};
+use rust_htslib::bcf::{self, Read};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
@@ -286,6 +309,88 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 Scripts are executed immediately when added, so you can define functions, constants,
 or run any initialization code. All definitions persist across records.
+
+#### Setting Global Variables with `set()`
+
+Use `set()` to efficiently set JavaScript global variables from Rust values without
+any JS compilation overhead. This is faster than `run("name = value")` when setting
+variables repeatedly:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut eval = Evaluator::new(reader.header())?;
+
+    // Set global variables efficiently (no JS compilation)
+    eval.set("min_dp", 10i32)?;
+    eval.set("threshold", 0.05f64)?;
+    eval.set("sample_name", "NA12878")?;
+    eval.set("allowed_chroms", vec!["chr1".to_string(), "chr2".to_string()])?;
+
+    for (i, result) in reader.records().enumerate() {
+        let record = result?;
+        eval.set_record(record);
+        // use .set for things that change each loop
+        eval.set("i", i)?;
+
+        // Use variables in expressions
+        let passes: bool = eval.eval("variant.info('DP') >= min_dp")?;
+        if passes {
+            let record = eval.take().unwrap();
+            // write record...
+        }
+    }
+    Ok(())
+}
+```
+
+Supported types for `set()`:
+- `i32`, `i64` - converts to JS `Number`
+- `f32`, `f64` - converts to JS `Number`
+- `bool` - converts to JS `Boolean`
+- `String`, `&str` - converts to JS `String`
+- `Vec<T>` - converts to JS `Array`
+
+#### Getting Global Variables with `get()`
+
+Use `get()` to retrieve JavaScript global values back into Rust:
+
+```rust
+use htsvcf::Evaluator;
+use rust_htslib::bcf::{self, Read};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let reader = bcf::Reader::from_path("input.vcf.gz")?;
+    let mut eval = Evaluator::new(reader.header())?;
+
+    // Set a counter
+    eval.set("counter", 0i32)?;
+
+    // Modify via JS
+    eval.run("counter += 1")?;
+    eval.run("counter += 1")?;
+
+    // Retrieve the modified value
+    let count: i32 = eval.get("counter")?;
+    assert_eq!(count, 2);
+
+    // Use Option<T> for variables that might not exist
+    let maybe: Option<i32> = eval.get("nonexistent")?;
+    assert_eq!(maybe, None);
+    
+    Ok(())
+}
+```
+
+Supported types for `get()`:
+- `String` - any JS value converted to string
+- `bool` - uses JavaScript truthiness rules
+- `i32`, `i64`, `f32`, `f64` - extracts numbers
+- `Vec<T>` - extracts arrays
+- `Option<T>` - returns `None` for `null`/`undefined`
 
 #### Complex Expressions
 

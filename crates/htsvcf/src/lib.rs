@@ -27,28 +27,48 @@
 //!
 //! # Library Example
 //!
+//! This example demonstrates the core API: reading VCF records, setting global
+//! variables with [`Evaluator::set`], defining functions with [`Evaluator::run`],
+//! evaluating expressions with [`Evaluator::eval`], retrieving values with
+//! [`Evaluator::get`], and writing filtered output.
+//!
 //! ```no_run
 //! use htsvcf::Evaluator;
 //! use rust_htslib::bcf::{self, Read};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
+//!     let header = bcf::Header::from_template(reader.header());
+//!     let mut writer = bcf::Writer::from_path("output.vcf.gz", &header, true, bcf::Format::Vcf)?;
 //!     let mut eval = Evaluator::new(reader.header())?;
 //!
-    //!     // Define reusable functions with run()
-    //!     eval.run("function passes(v) { return v.info('DP') > 10 }")?;
+//!     // Set global variables efficiently (no JS compilation overhead)
+//!     eval.set("min_dp", 10i32)?;
+//!     eval.set("min_qual", 20.0f64)?;
+//!     eval.set("target_chroms", vec!["chr1".to_string(), "chr2".to_string()])?;
 //!
-//!     for result in reader.records() {
+//!     // Define reusable filter functions with run()
+//!     eval.run("function passes(v) { return v.info('DP') >= min_dp && v.qual >= min_qual }")?;
+//!     eval.run("function onTarget(v) { return target_chroms.includes(v.chrom) }")?;
+//!
+//!     let mut count = 0usize;
+//!     for (i, result) in reader.records().enumerate() {
 //!         let record = result?;
 //!         eval.set_record(record);
-//!         
+//!
+//!         // Update loop index in JS (useful for expressions that need it)
+//!         eval.set("i", i)?;
+//!
 //!         // Expressions are compiled once and cached
-//!         let dominated: bool = eval.eval("passes(variant) && variant.qual > 20")?;
+//!         let dominated: bool = eval.eval("passes(variant) && onTarget(variant)")?;
 //!         if dominated {
+//!             count += 1;
 //!             let record = eval.take().unwrap();
-//!             // write record...
+//!             writer.write(&record)?;
 //!         }
 //!     }
+//!
+//!     eprintln!("Wrote {} variants", count);
 //!     Ok(())
 //! }
 //! ```
@@ -185,6 +205,6 @@ pub mod variant;
 pub mod writer;
 
 pub use evaluator::{EvalError, Evaluator};
-pub use fromjs::FromJsValue;
+pub use fromjs::{FromJsValue, ToJsValue};
 pub use header::Header;
 pub use variant::Variant;

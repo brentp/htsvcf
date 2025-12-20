@@ -23,9 +23,10 @@
 //!     let mut reader = bcf::Reader::from_path("input.vcf.gz")?;
 //!     let mut eval = Evaluator::new(reader.header())?;
 //!
-//!     for result in reader.records() {
+//!     for (i, result) in reader.records().enumerate() {
 //!         let record = result?;
 //!         eval.set_record(record);
+//!         eval.set("i", i)?; // use .set() for things that change frequently rather than .run()
 //!
 //!         // Expressions are compiled on first use, cached for subsequent records
 //!         let dp: i32 = eval.eval("variant.info('DP')")?;
@@ -45,7 +46,7 @@ use std::sync::Arc;
 
 use rust_htslib::bcf;
 
-use crate::fromjs::FromJsValue;
+use crate::fromjs::{FromJsValue, ToJsValue};
 use crate::header::{create_header_object, Header};
 use crate::runtime;
 use crate::variant::{create_object_template, create_variant_object, Variant};
@@ -573,6 +574,129 @@ impl Evaluator {
             .ok_or_else(|| EvalError::RuntimeError("script execution failed".into()))?;
 
         Ok(())
+    }
+
+    /// Set a global JavaScript variable from a Rust value.
+    ///
+    /// This efficiently sets a variable on the JavaScript global object without
+    /// any JS compilation overhead. Use this instead of `run("name = value")` when
+    /// you need to set variables repeatedly or from dynamic Rust values.
+    ///
+    /// # Type Parameter
+    ///
+    /// The value type `T` must implement [`ToJsValue`]. Built-in implementations:
+    ///
+    /// - `i32`, `i64` - converts to JS `Number`
+    /// - `f32`, `f64` - converts to JS `Number`
+    /// - `bool` - converts to JS `Boolean`
+    /// - `String`, `&str` - converts to JS `String`
+    /// - `Vec<T>` - converts to JS `Array`
+    ///
+    /// # Errors
+    ///
+    /// Returns `EvalError::V8Setup` if the variable name cannot be created.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use htsvcf::Evaluator;
+    /// use rust_htslib::bcf::{self, Read};
+    ///
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
+    ///
+    /// // Set global variables efficiently (no JS compilation)
+    /// eval.set("min_dp", 10i32).unwrap();
+    /// eval.set("threshold", 0.05f64).unwrap();
+    /// eval.set("sample_name", "NA12878").unwrap();
+    /// eval.set("allowed_chroms", vec!["chr1".to_string(), "chr2".to_string()]).unwrap();
+    ///
+    /// for result in reader.records() {
+    ///     let record = result.unwrap();
+    ///     eval.set_record(record);
+    ///
+    ///     // Use the variables in expressions
+    ///     let passes: bool = eval.eval("variant.info('DP') >= min_dp").unwrap();
+    ///     if passes {
+    ///         let record = eval.take().unwrap();
+    ///         // write record...
+    ///     }
+    /// }
+    /// ```
+    pub fn set<T: ToJsValue>(&mut self, name: &str, value: T) -> Result<(), EvalError> {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let global = context.global(scope);
+        let key = v8::String::new(scope, name)
+            .ok_or_else(|| EvalError::V8Setup(format!("failed to create key string '{}'", name)))?;
+        let js_value = value.to_js_value(scope);
+
+        global.set(scope, key.into(), js_value);
+        Ok(())
+    }
+
+    /// Get a global JavaScript variable and convert it to a Rust type.
+    ///
+    /// This retrieves a value from the JavaScript global object and converts it
+    /// to the requested Rust type using [`FromJsValue`].
+    ///
+    /// # Type Parameter
+    ///
+    /// The result type `T` must implement [`FromJsValue`]. Built-in implementations:
+    ///
+    /// - `String` - converts any JS value to string
+    /// - `bool` - uses JavaScript truthiness rules
+    /// - `i32`, `i64` - extracts integers (errors on non-numeric values)
+    /// - `f32`, `f64` - extracts floating point numbers
+    /// - `Vec<T>` - extracts arrays
+    /// - `Option<T>` - returns `None` for `null`/`undefined`
+    ///
+    /// # Errors
+    ///
+    /// - `EvalError::V8Setup` - if the variable name cannot be created
+    /// - `EvalError::RuntimeError` - if the variable doesn't exist or type conversion fails
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use htsvcf::Evaluator;
+    /// use rust_htslib::bcf::{self, Read};
+    ///
+    /// let mut reader = bcf::Reader::from_path("input.vcf.gz").unwrap();
+    /// let mut eval = Evaluator::new(reader.header()).unwrap();
+    ///
+    /// // Set a variable
+    /// eval.set("counter", 0i32).unwrap();
+    ///
+    /// // Later, retrieve it
+    /// eval.run("counter += 1").unwrap();
+    /// let count: i32 = eval.get("counter").unwrap();
+    /// assert_eq!(count, 1);
+    ///
+    /// // Use Option<T> for variables that might not exist
+    /// let maybe: Option<i32> = eval.get("nonexistent").unwrap();
+    /// assert_eq!(maybe, None);
+    /// ```
+    pub fn get<T: FromJsValue>(&mut self, name: &str) -> Result<T, EvalError> {
+        let _guard = runtime::v8_lock();
+
+        v8::scope!(handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let global = context.global(scope);
+        let key = v8::String::new(scope, name)
+            .ok_or_else(|| EvalError::V8Setup(format!("failed to create key string '{}'", name)))?;
+
+        let value = global
+            .get(scope, key.into())
+            .ok_or_else(|| EvalError::RuntimeError(format!("global '{}' not found", name)))?;
+
+        T::from_js_value(scope, value).map_err(EvalError::RuntimeError)
     }
 
     /// Take ownership of the bcf::Record from the last evaluated variant.
@@ -1583,5 +1707,329 @@ mod tests {
 
         let count: i32 = js_eval.eval("getSampleCount()").unwrap();
         assert!(count >= 0);
+    }
+
+    // ========================================================================
+    // Tests for set() and get() methods
+    // ========================================================================
+
+    #[test]
+    fn test_set_and_get_i32() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("x", 42i32).unwrap();
+        let v: i32 = js_eval.get("x").unwrap();
+        assert_eq!(v, 42);
+    }
+
+    #[test]
+    fn test_set_and_get_i64() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("big", 123456789i64).unwrap();
+        let v: i64 = js_eval.get("big").unwrap();
+        assert_eq!(v, 123456789);
+    }
+
+    #[test]
+    fn test_set_and_get_f32() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("val", 3.12f32).unwrap();
+        let v: f32 = js_eval.get("val").unwrap();
+        assert!((v - 3.12).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_set_and_get_f64() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("p", 3.12).unwrap();
+        let v: f64 = js_eval.get("p").unwrap();
+        assert!((v - 3.12).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_set_and_get_bool() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("flag", true).unwrap();
+        let v: bool = js_eval.get("flag").unwrap();
+        assert!(v);
+
+        js_eval.set("flag", false).unwrap();
+        let v: bool = js_eval.get("flag").unwrap();
+        assert!(!v);
+    }
+
+    #[test]
+    fn test_set_and_get_string() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("name", "hello world".to_string()).unwrap();
+        let v: String = js_eval.get("name").unwrap();
+        assert_eq!(v, "hello world");
+    }
+
+    #[test]
+    fn test_set_and_get_str_slice() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Test setting &str directly
+        js_eval.set("sample", "NA12878").unwrap();
+        let v: String = js_eval.get("sample").unwrap();
+        assert_eq!(v, "NA12878");
+    }
+
+    #[test]
+    fn test_set_and_get_vec_i32() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("nums", vec![1i32, 2, 3, 4, 5]).unwrap();
+        let v: Vec<i32> = js_eval.get("nums").unwrap();
+        assert_eq!(v, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_set_and_get_vec_f64() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("freqs", vec![0.1f64, 0.2, 0.7]).unwrap();
+        let v: Vec<f64> = js_eval.get("freqs").unwrap();
+        assert_eq!(v.len(), 3);
+        assert!((v[0] - 0.1).abs() < 1e-10);
+        assert!((v[1] - 0.2).abs() < 1e-10);
+        assert!((v[2] - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_set_and_get_vec_string() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval
+            .set(
+                "samples",
+                vec!["NA12878".to_string(), "NA12879".to_string()],
+            )
+            .unwrap();
+        let v: Vec<String> = js_eval.get("samples").unwrap();
+        assert_eq!(v, vec!["NA12878", "NA12879"]);
+    }
+
+    #[test]
+    fn test_set_overwrites_existing() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("x", 1i32).unwrap();
+        assert_eq!(js_eval.get::<i32>("x").unwrap(), 1);
+
+        js_eval.set("x", 2i32).unwrap();
+        assert_eq!(js_eval.get::<i32>("x").unwrap(), 2);
+
+        js_eval.set("x", 100i32).unwrap();
+        assert_eq!(js_eval.get::<i32>("x").unwrap(), 100);
+    }
+
+    #[test]
+    fn test_set_used_in_eval() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Set threshold variable
+        js_eval.set("threshold", 5i32).unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        // Use in expression (DP=10, so 10 > 5 should be true)
+        let passes: bool = js_eval.eval("variant.info('DP') > threshold").unwrap();
+        assert!(passes);
+
+        // Change threshold and re-evaluate
+        js_eval.set("threshold", 15i32).unwrap();
+        let passes: bool = js_eval.eval("variant.info('DP') > threshold").unwrap();
+        assert!(!passes); // 10 > 15 is false
+    }
+
+    #[test]
+    fn test_set_used_in_function() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Define a function that uses a global variable
+        js_eval
+            .run("function passes(v) { return v.info('DP') >= min_dp }")
+            .unwrap();
+
+        // Set the threshold
+        js_eval.set("min_dp", 10i32).unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        // DP=10, min_dp=10, so passes
+        let result: bool = js_eval.eval("passes(variant)").unwrap();
+        assert!(result);
+
+        // Increase threshold
+        js_eval.set("min_dp", 11i32).unwrap();
+        let result: bool = js_eval.eval("passes(variant)").unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_get_undefined_with_option() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Getting an undefined variable as Option<T> should return None
+        let maybe: Option<i32> = js_eval.get("nonexistent").unwrap();
+        assert_eq!(maybe, None);
+
+        // Set it and now it should be Some
+        js_eval.set("nonexistent", 42i32).unwrap();
+        let maybe: Option<i32> = js_eval.get("nonexistent").unwrap();
+        assert_eq!(maybe, Some(42));
+    }
+
+    #[test]
+    fn test_get_type_mismatch() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("str_val", "hello").unwrap();
+
+        // Trying to get a string as i32 should error
+        let result: Result<i32, EvalError> = js_eval.get("str_val");
+        assert!(result.is_err());
+        match result {
+            Err(EvalError::RuntimeError(msg)) => {
+                assert!(msg.contains("expected i32"));
+            }
+            _ => panic!("expected RuntimeError"),
+        }
+    }
+
+    #[test]
+    fn test_set_and_get_empty_vec() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("empty", Vec::<i32>::new()).unwrap();
+        let v: Vec<i32> = js_eval.get("empty").unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_set_multiple_variables() {
+        let path = fixture_vcf();
+        let mut reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Set multiple variables
+        js_eval.set("min_dp", 5i32).unwrap();
+        js_eval.set("max_dp", 100i32).unwrap();
+        js_eval.set("sample_name", "NA12878").unwrap();
+        js_eval
+            .set("allowed_chroms", vec!["chr1".to_string(), "chr2".to_string()])
+            .unwrap();
+
+        let record = reader.records().next().unwrap().unwrap();
+        js_eval.set_record(record);
+
+        // Use all variables in a complex expression
+        let result: bool = js_eval
+            .eval("variant.info('DP') >= min_dp && variant.info('DP') <= max_dp && allowed_chroms.includes(variant.chrom)")
+            .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_get_modified_by_js() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Set initial value
+        js_eval.set("counter", 0i32).unwrap();
+
+        // Modify via JS
+        js_eval.run("counter = counter + 10").unwrap();
+
+        // Get the modified value
+        let v: i32 = js_eval.get("counter").unwrap();
+        assert_eq!(v, 10);
+
+        // Modify again
+        js_eval.run("counter *= 2").unwrap();
+        let v: i32 = js_eval.get("counter").unwrap();
+        assert_eq!(v, 20);
+    }
+
+    #[test]
+    fn test_set_and_get_usize() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        js_eval.set("idx", 42usize).unwrap();
+        let v: usize = js_eval.get("idx").unwrap();
+        assert_eq!(v, 42);
+
+        // Test larger value
+        js_eval.set("big_idx", 1_000_000usize).unwrap();
+        let v: usize = js_eval.get("big_idx").unwrap();
+        assert_eq!(v, 1_000_000);
+    }
+
+    #[test]
+    fn test_get_usize_negative_error() {
+        let path = fixture_vcf();
+        let reader = bcf::Reader::from_path(&path).unwrap();
+        let mut js_eval = Evaluator::new(reader.header()).unwrap();
+
+        // Set a negative value as a global variable via JS (var instead of let to make it global)
+        js_eval.run("var neg = -5").unwrap();
+
+        // Getting as usize should error
+        let result: Result<usize, EvalError> = js_eval.get("neg");
+        assert!(result.is_err(), "expected error, got: {:?}", result);
+        match result {
+            Err(EvalError::RuntimeError(msg)) => {
+                assert!(
+                    msg.contains("negative"),
+                    "error message should contain 'negative', got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected RuntimeError, got: {:?}", other),
+        }
     }
 }
