@@ -11,12 +11,15 @@ This crate builds both:
 
 Build and run:
 
-- `cargo run --release -- <input.vcf|input.bcf> [js_expr]`
+- `cargo run --release -- <input.vcf|input.bcf> [js_expr] [--prelude prelude.js]`
 
 Examples:
 
 - `cargo run --release -- tests/t.vcf.gz "variant.chrom + ':' + variant.pos"`
 - `cargo run --release -- tests/t.vcf.gz "variant.info('DP')"`
+- `cargo run --release -- tests/t.vcf.gz "variant.toString()" --prelude prelude.js`
+
+`prelude.js` is executed once before processing records, and is useful for defining helper functions and/or mutating `header`.
 
 The CLI prints the expression result (stringified) once per record.
 
