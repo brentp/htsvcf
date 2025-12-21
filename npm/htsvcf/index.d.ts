@@ -56,14 +56,19 @@ export type HeaderGetResult = {
   description: string;
 };
 
-/** A header record representing INFO, FORMAT, FILTER, contig, or other metadata. */
-export type HeaderRecord =
-  | { type: "INFO"; key: string; [k: string]: string }
-  | { type: "FORMAT"; key: string; [k: string]: string }
-  | { type: "FILTER"; key: string; [k: string]: string }
-  | { type: "contig"; key: string; [k: string]: string }
-  | { type: "structured"; key: string; [k: string]: string }
-  | { type: "generic"; key: string; value: string };
+/** A header record representing an INFO, FORMAT, or FILTER field definition. */
+export type HeaderRecord = {
+  /** Record category: "INFO", "FORMAT", or "FILTER". */
+  section: "INFO" | "FORMAT" | "FILTER";
+  /** Field ID (e.g., "DP", "GT"). */
+  id: string;
+  /** Number specification ("1", "A", "R", "G", "."). */
+  number: string;
+  /** Value type ("Integer", "Float", "String", "Flag"). */
+  type: "Integer" | "Float" | "String" | "Flag";
+  /** Field description from header. */
+  description: string;
+};
 
 /** A single VCF/BCF variant record. */
 export class Variant {

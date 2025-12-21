@@ -512,16 +512,17 @@ if (r.hasIndex()) {
 
 - `header`: methods
   - `header.records() -> Array<object>`
-    - Each record has a `type` field and additional key/value pairs parsed from the header line.
-    - `type` can be: `"INFO"`, `"FORMAT"`, `"FILTER"`, `"contig"`, `"structured"`, `"generic"`.
-    - For `type === "FILTER"`, records correspond to `##FILTER=<...>` header lines (e.g. named filters like `q10`, etc.).
+    - Each record has `section`, `id`, `number`, `type`, and `description` fields.
+    - `section` is the record category: `"INFO"`, `"FORMAT"`, or `"FILTER"`.
+    - `type` is the field value type: `"Integer"`, `"Float"`, `"String"`, or `"Flag"`.
+    - For `section === "FILTER"`, records correspond to `##FILTER=<...>` header lines (e.g. named filters like `q10`, etc.).
       - Example (list filter IDs defined in the header):
 
         ```js
         const filters = header
           .records()
-          .filter(r => r.type === 'FILTER')
-          .map(r => r.key)
+          .filter(r => r.section === 'FILTER')
+          .map(r => r.id)
         filters.join(',')
         ```
 

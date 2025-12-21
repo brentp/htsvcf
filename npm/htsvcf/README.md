@@ -148,8 +148,8 @@ if (dpInfo) {
 // Get all header records
 const records = header.records();
 for (const rec of records) {
-  if (rec.type === "INFO") {
-    console.log(`INFO field: ${rec.key}`);
+  if (rec.section === "INFO") {
+    console.log(`INFO field: ${rec.id} (${rec.type})`);
   }
 }
 

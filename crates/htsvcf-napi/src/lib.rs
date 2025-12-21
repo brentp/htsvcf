@@ -176,7 +176,7 @@
 //!
 //! // List all header records
 //! header.records()
-//! // [{ type: 'INFO', id: 'DP', number: '1', ... }, ...]
+//! // [{ section: 'INFO', id: 'DP', number: '1', type: 'Integer', ... }, ...]
 //!
 //! // Add new field definitions
 //! header.addInfo('CUSTOM', '1', 'Integer', 'My custom annotation')
@@ -982,7 +982,7 @@ impl Header {
         let mut out = Vec::new();
         for (section, field) in self.inner.all_fields() {
             let mut o: Object<'static> = Object::new(&env)?;
-            o.set_named_property("type", section)?;
+            o.set_named_property("section", section)?;
             o.set_named_property("id", field.id)?;
             o.set_named_property("number", field.number)?;
             o.set_named_property("type", field.r#type)?;

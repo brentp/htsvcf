@@ -200,11 +200,11 @@ fn records_fn(
     let arr = v8::Array::new(scope, fields.len() as i32);
     for (i, (section, field)) in fields.into_iter().enumerate() {
         let o = v8::Object::new(scope);
-        set_str(scope, &o, "type", &section);
-        set_str(scope, &o, "ID", &field.id);
-        set_str(scope, &o, "Number", &field.number);
-        set_str(scope, &o, "Type", &field.r#type);
-        set_str(scope, &o, "Description", &field.description);
+        set_str(scope, &o, "section", &section);
+        set_str(scope, &o, "id", &field.id);
+        set_str(scope, &o, "number", &field.number);
+        set_str(scope, &o, "type", &field.r#type);
+        set_str(scope, &o, "description", &field.description);
 
         arr.set_index(scope, i as u32, o.into());
     }
@@ -444,26 +444,28 @@ chr1\t1\t.\tA\tC\t.\t.\tDP=7\tGT\t0/1\n";
             "1"
         );
 
+        // Verify records() uses 'section' for category and 'type' for value type
         assert_eq!(
             eval_header_js(
                 path,
-                "header.records().filter(r => r.type === 'INFO').length"
+                "header.records().filter(r => r.section === 'INFO').length"
             ),
             "1"
         );
         assert_eq!(
             eval_header_js(
                 path,
-                "header.records().filter(r => r.type === 'FORMAT').length"
+                "header.records().filter(r => r.section === 'FORMAT').length"
             ),
             "1"
         );
+        // Check that lowercase keys are used and type contains value type (not section)
         assert_eq!(
             eval_header_js(
                 path,
-                "(() => { const r = header.records().filter(r => r.type === 'INFO')[0]; return r ? (r.ID + ':' + r.Description.replaceAll('\\\"','')) : 'missing'; })()",
+                "(() => { const r = header.records().find(r => r.id === 'DP'); return `${r.section}:${r.type}:${r.number}`; })()"
             ),
-            "DP:Depth"
+            "INFO:Integer:1"
         );
 
         let _ = fs::remove_file(path);

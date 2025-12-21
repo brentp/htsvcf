@@ -519,3 +519,48 @@ test("Variant.samples includes parsed genotype for each sample", () => {
 
   reader.close();
 });
+
+test("Header.records returns section and type correctly", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-records-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1",
+    "chr1\t1\t.\tA\tC\t.\t.\tDP=7\tGT\t0/1",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const records = reader.header.records();
+
+  // Check INFO/DP record has correct shape (section vs type distinction)
+  const dpRecord = records.find(r => r.id === "DP");
+  assert.deepEqual(dpRecord, {
+    section: "INFO",
+    id: "DP",
+    number: "1",
+    type: "Integer",
+    description: "Depth",
+  });
+
+  // Check FORMAT/GT record
+  const gtRecord = records.find(r => r.id === "GT");
+  assert.deepEqual(gtRecord, {
+    section: "FORMAT",
+    id: "GT",
+    number: "1",
+    type: "String",
+    description: "Genotype",
+  });
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
