@@ -11,15 +11,44 @@ npm install htsvcf
 ## Quick Start
 
 ```javascript
-import { Reader } from "htsvcf";
+import { Reader, Writer } from "htsvcf";
 
-const reader = new Reader("path/to/file.vcf.gz");
+const reader = new Reader("samples.vcf.gz");
 
-// Fast sync iteration
-for (const variant of reader) {
-  console.log(variant.chrom, variant.pos, variant.ref, variant.alt);
+// Print header info
+console.log("Samples:", reader.header.samples());
+const dpDef = reader.header.get("INFO", "DP");
+console.log(`DP field: ${dpDef.type} (${dpDef.description})`);
+
+// Add a custom INFO field to the header
+reader.header.addInfo("HIGHQUAL", "0", "Flag", "Variant passed quality filter");
+
+// Create a writer with the modified header
+const writer = new Writer("filtered.vcf.gz", reader.header);
+
+// Process variants
+for await (const v of reader) {
+  // Translate variant to the writer's header (required after modifying header)
+  v.translate(writer.header);
+
+  // Filter by quality
+  if (v.qual !== null && v.qual < 30) continue;
+
+  // Set our custom flag
+  v.set_info("HIGHQUAL", true);
+
+  // Get per-sample data
+  for (const s of v.samples()) {
+    if (s.DP !== null && s.DP > 10) {
+      console.log(`${v.chrom}:${v.pos} ${s.sample_name} DP=${s.DP}`);
+    }
+  }
+
+  // Write the variant
+  writer.write(v);
 }
 
+writer.close();
 reader.close();
 ```
 
@@ -112,10 +141,8 @@ console.log("Samples:", samples); // ["S1", "S2", "S3"]
 // Get INFO/FORMAT field definitions
 const dpInfo = header.get("INFO", "DP");
 if (dpInfo) {
-  console.log(dpInfo.id);          // "DP"
-  console.log(dpInfo.type);        // "Integer"
-  console.log(dpInfo.number);      // "1"
-  console.log(dpInfo.description); // "Depth"
+  console.log(dpInfo.id, dpInfo.type, dpInfo.number, dpInfo.description);
+  // "DP" "Integer" "1" "Depth"
 }
 
 // Get all header records
@@ -152,6 +179,8 @@ const writer = new Writer("out.vcf", reader.header, {
 });
 
 for (const v of reader) {
+  // Translate the variant to the writer's header before setting new fields
+  v.translate(writer.header);
   v.set_info("ZZ", 42);
   // NOTE: write() consumes the Variant
   writer.write(v);
@@ -244,42 +273,6 @@ const subset = variant.samples(["S1", "S3"]);
 // Get VCF line representation
 console.log(variant.toString());
 // chr1	1000	rs123	A	C	99	PASS	DP=42	GT:DP	0/1:10	0/0:15
-```
-
-## Complete Example
-
-```javascript
-import { Reader } from "htsvcf";
-
-const reader = new Reader("samples.vcf.gz");
-
-// Print header info
-console.log("Samples:", reader.header.samples());
-const dpDef = reader.header.get("INFO", "DP");
-if (dpDef) {
-  console.log(`DP field: ${dpDef.type} (${dpDef.description})`);
-}
-
-// Process variants
-let count = 0;
-for await (const v of reader) {
-  // Filter by quality
-  if (v.qual !== null && v.qual < 30) continue;
-
-  // Get INFO depth
-  const dp = v.info("DP");
-
-  // Get per-sample data
-  for (const s of v.samples()) {
-    if (s.DP !== null && s.DP > 10) {
-      console.log(`${v.chrom}:${v.pos} ${s.sample_name} DP=${s.DP}`);
-    }
-  }
-
-  if (++count >= 100) break;
-}
-
-reader.close();
 ```
 
 ## Query Example
