@@ -105,6 +105,35 @@ export class Variant {
   translate(header: Header): void;
   /** Get a FORMAT field value (array with one entry per sample). */
   format(tag: string): Array<boolean | number | string | Array<number | string> | null> | undefined;
+  /**
+   * Set a FORMAT field value (array with one entry per sample).
+   *
+   * Values should be an array with one entry per sample. Each entry can be:
+   * - A scalar (number or string) for Number=1 fields
+   * - An array of values for multi-value fields (e.g., AD with Number=R)
+   * - null for missing values
+   *
+   * Pass null to clear the FORMAT field entirely.
+   *
+   * Note: GT (genotype) cannot be set via this method.
+   *
+   * @example
+   * // Set DP (Number=1) for 3 samples
+   * variant.set_format('DP', [10, 20, 30])
+   *
+   * // Set AD (Number=R) for 3 samples, each with 2 values
+   * variant.set_format('AD', [[5, 10], [8, 12], [3, 7]])
+   *
+   * // Set with missing values
+   * variant.set_format('DP', [10, null, 30])
+   *
+   * // Clear the field
+   * variant.set_format('DP', null)
+   */
+  set_format(
+    tag: string,
+    values: Array<number | string | null | Array<number | string | null>> | null
+  ): void;
   /** Get all FORMAT fields for a single sample by name. Includes parsed `genotype` if GT is present. */
   sample(name: string): ({ sample_name: string; genotype?: Genotype } & Record<string, number | string | null | Array<number | string | null>>) | undefined;
   /** Get all FORMAT fields for all samples, or a subset if specified. Includes parsed `genotype` if GT is present. */

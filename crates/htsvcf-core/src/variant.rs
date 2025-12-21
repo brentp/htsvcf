@@ -655,6 +655,190 @@ pub fn record_clear_info(
     Ok(())
 }
 
+// ============================================================================
+// FORMAT field setters
+// ============================================================================
+
+/// Missing value sentinel for i32 FORMAT fields.
+/// This matches htslib's bcf_int32_missing.
+const FORMAT_MISSING_INT: i32 = i32::MIN;
+
+/// Missing value sentinel for f32 FORMAT fields.
+/// This matches htslib's bcf_float_missing (a specific NaN).
+fn format_missing_float() -> f32 {
+    f32::from_bits(0x7F80_0001)
+}
+
+/// Set a FORMAT integer field on a record.
+///
+/// The `values` slice should be flattened: for a field with `n` values per sample
+/// and `s` samples, provide `s * n` values in sample-major order:
+/// `[sample0_val0, sample0_val1, ..., sample1_val0, sample1_val1, ...]`
+///
+/// Use `FORMAT_MISSING_INT` (`i32::MIN`) to represent missing values.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The tag is not defined in the header
+/// - The tag is not an Integer type
+/// - The tag is "GT" (use dedicated genotype methods instead)
+pub fn record_set_format_integer(
+    record: &mut bcf::Record,
+    header: &Header,
+    tag: &str,
+    values: &[i32],
+) -> Result<(), rust_htslib::errors::Error> {
+    if tag == "GT" {
+        return Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: "GT cannot be set via set_format; use dedicated genotype methods".to_string(),
+        });
+    }
+
+    let (tag_type, _) = header.format_type(tag.as_bytes()).ok_or_else(|| {
+        rust_htslib::errors::Error::BcfUndefinedTag {
+            tag: tag.to_string(),
+        }
+    })?;
+
+    if tag_type != TagType::Integer {
+        return Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: tag.to_string(),
+        });
+    }
+
+    record.push_format_integer(tag.as_bytes(), values)?;
+    record.unpack();
+    Ok(())
+}
+
+/// Set a FORMAT float field on a record.
+///
+/// The `values` slice should be flattened: for a field with `n` values per sample
+/// and `s` samples, provide `s * n` values in sample-major order:
+/// `[sample0_val0, sample0_val1, ..., sample1_val0, sample1_val1, ...]`
+///
+/// Use `format_missing_float()` to represent missing values.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The tag is not defined in the header
+/// - The tag is not a Float type
+pub fn record_set_format_float(
+    record: &mut bcf::Record,
+    header: &Header,
+    tag: &str,
+    values: &[f32],
+) -> Result<(), rust_htslib::errors::Error> {
+    let (tag_type, _) = header.format_type(tag.as_bytes()).ok_or_else(|| {
+        rust_htslib::errors::Error::BcfUndefinedTag {
+            tag: tag.to_string(),
+        }
+    })?;
+
+    if tag_type != TagType::Float {
+        return Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: tag.to_string(),
+        });
+    }
+
+    record.push_format_float(tag.as_bytes(), values)?;
+    record.unpack();
+    Ok(())
+}
+
+/// Set a FORMAT string field on a record.
+///
+/// Provide one string per sample. For multi-value string fields, concatenate
+/// values with commas within each sample's string.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The tag is not defined in the header
+/// - The tag is not a String type
+/// - The tag is "GT" (use dedicated genotype methods instead)
+pub fn record_set_format_string(
+    record: &mut bcf::Record,
+    header: &Header,
+    tag: &str,
+    values: &[String],
+) -> Result<(), rust_htslib::errors::Error> {
+    if tag == "GT" {
+        return Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: "GT cannot be set via set_format; use dedicated genotype methods".to_string(),
+        });
+    }
+
+    let (tag_type, _) = header.format_type(tag.as_bytes()).ok_or_else(|| {
+        rust_htslib::errors::Error::BcfUndefinedTag {
+            tag: tag.to_string(),
+        }
+    })?;
+
+    if tag_type != TagType::String {
+        return Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: tag.to_string(),
+        });
+    }
+
+    let refs: Vec<&[u8]> = values.iter().map(|s| s.as_bytes()).collect();
+    record.push_format_string(tag.as_bytes(), &refs)?;
+    record.unpack();
+    Ok(())
+}
+
+/// Clear (remove) a FORMAT field from a record.
+///
+/// # Errors
+///
+/// Returns an error if the tag is not defined in the header.
+pub fn record_clear_format(
+    record: &mut bcf::Record,
+    header: &Header,
+    tag: &str,
+) -> Result<(), rust_htslib::errors::Error> {
+    if tag == "GT" {
+        return Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: "GT cannot be cleared via clear_format".to_string(),
+        });
+    }
+
+    let (tag_type, _) = header.format_type(tag.as_bytes()).ok_or_else(|| {
+        rust_htslib::errors::Error::BcfUndefinedTag {
+            tag: tag.to_string(),
+        }
+    })?;
+
+    // To clear a FORMAT field, we call the appropriate push method with an empty slice.
+    // This is how htslib handles clearing FORMAT fields.
+    match tag_type {
+        TagType::Integer => record.push_format_integer(tag.as_bytes(), &[])?,
+        TagType::Float => record.push_format_float(tag.as_bytes(), &[])?,
+        TagType::String => record.push_format_string::<&[u8]>(tag.as_bytes(), &[])?,
+        TagType::Flag => {
+            // FORMAT flags are rare but handle them
+            return Err(rust_htslib::errors::Error::BcfSetTag {
+                tag: format!("FORMAT/{tag} is a Flag type which is not supported"),
+            });
+        }
+    }
+
+    record.unpack();
+    Ok(())
+}
+
+/// Get the missing value sentinel for FORMAT integer fields.
+pub fn format_int_missing() -> i32 {
+    FORMAT_MISSING_INT
+}
+
+/// Get the missing value sentinel for FORMAT float fields.
+pub fn format_float_missing() -> f32 {
+    format_missing_float()
+}
+
 /// A VCF/BCF variant record with convenient field accessors.
 ///
 /// `Variant` wraps a `rust_htslib::bcf::Record` and provides methods for
@@ -987,6 +1171,73 @@ impl Variant {
 
         self.record.unpack();
         Ok(())
+    }
+
+    /// Set a FORMAT integer field.
+    ///
+    /// The `values` slice should be flattened: for a field with `n` values per sample
+    /// and `s` samples, provide `s * n` values in sample-major order.
+    ///
+    /// Use [`format_int_missing()`] to represent missing values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tag is not defined, is not Integer type, or is "GT".
+    pub fn set_format_integer(
+        &mut self,
+        header: &Header,
+        tag: &str,
+        values: &[i32],
+    ) -> Result<(), rust_htslib::errors::Error> {
+        record_set_format_integer(&mut self.record, header, tag, values)
+    }
+
+    /// Set a FORMAT float field.
+    ///
+    /// The `values` slice should be flattened: for a field with `n` values per sample
+    /// and `s` samples, provide `s * n` values in sample-major order.
+    ///
+    /// Use [`format_float_missing()`] to represent missing values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tag is not defined or is not Float type.
+    pub fn set_format_float(
+        &mut self,
+        header: &Header,
+        tag: &str,
+        values: &[f32],
+    ) -> Result<(), rust_htslib::errors::Error> {
+        record_set_format_float(&mut self.record, header, tag, values)
+    }
+
+    /// Set a FORMAT string field.
+    ///
+    /// Provide one string per sample.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tag is not defined, is not String type, or is "GT".
+    pub fn set_format_string(
+        &mut self,
+        header: &Header,
+        tag: &str,
+        values: &[String],
+    ) -> Result<(), rust_htslib::errors::Error> {
+        record_set_format_string(&mut self.record, header, tag, values)
+    }
+
+    /// Clear (remove) a FORMAT field from this record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tag is not defined in the header or is "GT".
+    pub fn clear_format(
+        &mut self,
+        header: &Header,
+        tag: &str,
+    ) -> Result<(), rust_htslib::errors::Error> {
+        record_clear_format(&mut self.record, header, tag)
     }
 
     /// Get an INFO field value by tag name.
@@ -1664,6 +1915,228 @@ chr1\t1\t.\tA\tC\t.\t.\t.\tDP:sample_name\t7:EVIL\n";
             map.get("sample_name"),
             Some(&FormatValue::String("S1".to_string()))
         );
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_format_integer() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT:DP\t0/1:10\t1/1:20\t0/0:30\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-format-int.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Set new DP values
+        variant
+            .set_format_integer(&header, "DP", &[100, 200, 300])
+            .unwrap();
+
+        // Read back and verify
+        let dp = variant.format(&header, "DP");
+        match dp {
+            FormatValue::PerSample(vals) => {
+                assert_eq!(vals.len(), 3);
+                assert_eq!(vals[0], FormatValue::Int(100));
+                assert_eq!(vals[1], FormatValue::Int(200));
+                assert_eq!(vals[2], FormatValue::Int(300));
+            }
+            _ => panic!("Expected PerSample, got {:?}", dp),
+        }
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_format_integer_with_missing() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-format-int-missing.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Set DP with a missing value (using sentinel)
+        let missing = format_int_missing();
+        variant
+            .set_format_integer(&header, "DP", &[100, missing])
+            .unwrap();
+
+        let dp = variant.format(&header, "DP");
+        match dp {
+            FormatValue::PerSample(vals) => {
+                assert_eq!(vals.len(), 2);
+                assert_eq!(vals[0], FormatValue::Int(100));
+                assert_eq!(vals[1], FormatValue::Missing);
+            }
+            _ => panic!("Expected PerSample, got {:?}", dp),
+        }
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_format_float() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=AF,Number=1,Type=Float,Description=\"Allele Freq\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tAF\t0.1\t0.2\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-format-float.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        variant
+            .set_format_float(&header, "AF", &[0.5, 0.75])
+            .unwrap();
+
+        let af = variant.format(&header, "AF");
+        match af {
+            FormatValue::PerSample(vals) => {
+                assert_eq!(vals.len(), 2);
+                match &vals[0] {
+                    FormatValue::Float(f) => assert!((f - 0.5).abs() < 0.001),
+                    _ => panic!("Expected Float"),
+                }
+                match &vals[1] {
+                    FormatValue::Float(f) => assert!((f - 0.75).abs() < 0.001),
+                    _ => panic!("Expected Float"),
+                }
+            }
+            _ => panic!("Expected PerSample, got {:?}", af),
+        }
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_format_string() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tNOTE\ta\tb\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-format-string.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        variant
+            .set_format_string(&header, "NOTE", &["hello".to_string(), "world".to_string()])
+            .unwrap();
+
+        let note = variant.format(&header, "NOTE");
+        match note {
+            FormatValue::PerSample(vals) => {
+                assert_eq!(vals.len(), 2);
+                assert_eq!(vals[0], FormatValue::String("hello".to_string()));
+                assert_eq!(vals[1], FormatValue::String("world".to_string()));
+            }
+            _ => panic!("Expected PerSample, got {:?}", note),
+        }
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_format_rejects_gt() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-format-gt.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Should fail when trying to set GT
+        let result = variant.set_format_string(&header, "GT", &["0/1".to_string()]);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_clear_format() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("clear-format.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Verify DP exists
+        assert!(!matches!(
+            variant.format(&header, "DP"),
+            FormatValue::Absent
+        ));
+
+        // Clear it
+        variant.clear_format(&header, "DP").unwrap();
+
+        // Should now be absent
+        assert!(matches!(variant.format(&header, "DP"), FormatValue::Absent));
 
         let _ = std::fs::remove_file(&vcf_path);
     }

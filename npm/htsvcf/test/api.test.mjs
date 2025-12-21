@@ -564,3 +564,234 @@ test("Header.records returns section and type correctly", async () => {
   reader.close();
   await fs.rm(tmp, { recursive: true, force: true });
 });
+
+test("Variant.set_format mutates FORMAT fields (integers)", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-format-int-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allele Depths">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\t30",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Verify initial values
+  assert.deepEqual(variant.format("DP"), [10, 20, 30]);
+
+  // Set new values (Number=1 field - flat array)
+  variant.set_format("DP", [100, 200, 300]);
+  assert.deepEqual(variant.format("DP"), [100, 200, 300]);
+
+  // Set with missing values using null
+  variant.set_format("DP", [100, null, 300]);
+  assert.deepEqual(variant.format("DP"), [100, null, 300]);
+
+  // Set Number=R field (nested arrays)
+  variant.set_format("AD", [[5, 10], [15, 20], [25, 30]]);
+  assert.deepEqual(variant.format("AD"), [[5, 10], [15, 20], [25, 30]]);
+
+  // Clear format field with null
+  variant.set_format("DP", null);
+  assert.equal(variant.format("DP"), undefined);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_format mutates FORMAT fields (floats)", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-format-float-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Genotype Quality">',
+    '##FORMAT=<ID=GL,Number=G,Type=Float,Description="Genotype Likelihoods">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGQ\t0.5\t0.75",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Set Number=1 float field
+  variant.set_format("GQ", [0.9, 0.8]);
+  const gq = variant.format("GQ");
+  assert.ok(Math.abs(gq[0] - 0.9) < 1e-5);
+  assert.ok(Math.abs(gq[1] - 0.8) < 1e-5);
+
+  // Set with missing value
+  variant.set_format("GQ", [0.9, null]);
+  const gq2 = variant.format("GQ");
+  assert.ok(Math.abs(gq2[0] - 0.9) < 1e-5);
+  assert.equal(gq2[1], null);
+
+  // Set nested float array
+  variant.set_format("GL", [[-0.1, -0.2, -0.3], [-0.4, -0.5, -0.6]]);
+  const gl = variant.format("GL");
+  assert.ok(Math.abs(gl[0][0] - (-0.1)) < 1e-5);
+  assert.ok(Math.abs(gl[1][2] - (-0.6)) < 1e-5);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_format mutates FORMAT fields (strings)", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-format-str-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=FT,Number=1,Type=String,Description="Filter">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tFT\tPASS\tPASS\tPASS",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Set string values
+  variant.set_format("FT", ["PASS", "LowQual", "LowDP"]);
+  assert.deepEqual(variant.format("FT"), ["PASS", "LowQual", "LowDP"]);
+
+  // Set with missing (null becomes ".")
+  variant.set_format("FT", ["PASS", null, "LowDP"]);
+  const ft = variant.format("FT");
+  assert.equal(ft[0], "PASS");
+  // null should become missing (represented as null in output)
+  assert.equal(ft[1], null);
+  assert.equal(ft[2], "LowDP");
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_format rejects GT field", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-format-gt-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1/1",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Attempt to set GT should throw
+  assert.throws(
+    () => variant.set_format("GT", ["0/0", "0/1"]),
+    /GT cannot be set via set_format/
+  );
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_format validates array length matches sample count", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-format-len-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\t30",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Too few values
+  assert.throws(
+    () => variant.set_format("DP", [10, 20]),
+    /array length.*must match sample count/
+  );
+
+  // Too many values
+  assert.throws(
+    () => variant.set_format("DP", [10, 20, 30, 40]),
+    /array length.*must match sample count/
+  );
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_format rejects undefined FORMAT tag", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-format-undef-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Undefined tag should throw
+  assert.throws(
+    () => variant.set_format("NOPE", [10, 20]),
+    /undefined FORMAT tag/
+  );
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});

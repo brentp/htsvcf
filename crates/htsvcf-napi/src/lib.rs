@@ -128,6 +128,11 @@
 //! v.format('DP')  // [30, 25, null]  (null = missing)
 //! v.format('AD')  // [[10, 20], [25, 0], [0, 30]]
 //!
+//! // Set FORMAT values (array with one entry per sample)
+//! v.set_format('DP', [40, 35, 50])
+//! v.set_format('AD', [[15, 25], [30, 5], [5, 35]])
+//! v.set_format('DP', null)  // Clear the field
+//!
 //! // Get all FORMAT fields for one sample by name
 //! const s = v.sample('NA12878')
 //! s.GT          // "0/1"
@@ -200,6 +205,8 @@
 //! ```
 
 use std::sync::{Arc, Mutex};
+
+mod format;
 
 use htsvcf_core as core;
 use htsvcf_core::variant::FormatValue;
@@ -871,6 +878,121 @@ impl Variant {
                             format!("failed to set info {tag}: {e}"),
                         )
                     })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Set a FORMAT field value (array with one entry per sample).
+    ///
+    /// Values should be an array with one entry per sample. Each entry can be:
+    /// - A scalar (number or string) for Number=1 fields
+    /// - An array of values for multi-value fields
+    /// - null for missing values
+    ///
+    /// Pass null to clear the FORMAT field entirely.
+    #[napi(js_name = "set_format")]
+    pub fn set_format(&mut self, tag: String, value: Unknown) -> napi::Result<()> {
+        use napi::ValueType;
+        use rust_htslib::bcf::header::TagType;
+
+        // Reject GT field
+        if tag == "GT" {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "GT cannot be set via set_format; use dedicated genotype methods",
+            ));
+        }
+
+        let header = self.header.clone();
+
+        let Some((tag_type, _tag_length)) = header.format_type(tag.as_bytes()) else {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!("undefined FORMAT tag: {tag}"),
+            ));
+        };
+
+        // Check for clear (null/undefined at top level)
+        match value.get_type()? {
+            ValueType::Null | ValueType::Undefined => {
+                let variant = self.variant_mut()?;
+                variant.clear_format(&header, &tag).map_err(|e| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("failed to clear format {tag}: {e}"),
+                    )
+                })?;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Value must be an array
+        if !value.is_array()? {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "variant.set_format values must be an array",
+            ));
+        }
+
+        let arr: Array = unsafe { value.cast()? };
+        let sample_count = self.header.sample_count() as u32;
+
+        if arr.len() != sample_count {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "variant.set_format array length ({}) must match sample count ({})",
+                    arr.len(),
+                    sample_count
+                ),
+            ));
+        }
+
+        let missing_int = htsvcf_core::format_int_missing();
+        let missing_float = htsvcf_core::format_float_missing();
+
+        match tag_type {
+            TagType::Integer => {
+                let flattened = format::flatten_format_integers(&tag, &arr, missing_int)?;
+                self.variant_mut()?
+                    .set_format_integer(&header, &tag, &flattened)
+                    .map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("failed to set format {tag}: {e}"),
+                        )
+                    })?;
+            }
+            TagType::Float => {
+                let flattened = format::flatten_format_floats(&tag, &arr, missing_float)?;
+                self.variant_mut()?
+                    .set_format_float(&header, &tag, &flattened)
+                    .map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("failed to set format {tag}: {e}"),
+                        )
+                    })?;
+            }
+            TagType::String => {
+                let strings = format::flatten_format_strings(&tag, &arr)?;
+                self.variant_mut()?
+                    .set_format_string(&header, &tag, &strings)
+                    .map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("failed to set format {tag}: {e}"),
+                        )
+                    })?;
+            }
+            TagType::Flag => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("FORMAT/{tag} is a Flag type which is not supported"),
+                ));
             }
         }
 

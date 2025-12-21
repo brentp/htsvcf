@@ -248,6 +248,11 @@ variant.set_info("DP", null); // Clear field
 const dpValues = variant.format("DP"); // [10, 15, null]
 const adValues = variant.format("AD"); // [[8, 2], [12, 3], [null, null]]
 
+// Modify FORMAT fields (array with one value per sample)
+variant.set_format("DP", [20, 25, 30]);
+variant.set_format("AD", [[10, 5], [15, 10], [8, 2]]);
+variant.set_format("DP", null); // Clear field
+
 // Get all FORMAT data for a single sample
 const s1 = variant.sample("S1");
 if (s1) {

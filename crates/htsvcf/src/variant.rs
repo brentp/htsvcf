@@ -362,6 +362,10 @@ pub fn create_object_template<'a>(
     let format_template = v8::FunctionTemplate::new(scope, format_fn);
     object_template.set(format_key.into(), format_template.into());
 
+    let set_format_key = v8::String::new(scope, "set_format").unwrap();
+    let set_format_template = v8::FunctionTemplate::new(scope, set_format_fn);
+    object_template.set(set_format_key.into(), set_format_template.into());
+
     let sample_key = v8::String::new(scope, "sample").unwrap();
     let sample_template = v8::FunctionTemplate::new(scope, sample_fn);
     object_template.set(sample_key.into(), sample_template.into());
@@ -805,6 +809,270 @@ fn set_info_fn(
 
     if let Err(e) = res {
         let msg = v8::String::new(scope, &format!("failed to set info {tag}: {e}")).unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+    }
+}
+
+/// V8 callback for `variant.set_format(tag, values)`.
+///
+/// Values should be an array with one entry per sample. Each entry can be:
+/// - A scalar (number or string) for Number=1 fields
+/// - An array of values for multi-value fields
+/// - null for missing values
+///
+/// Pass null to clear the FORMAT field entirely.
+fn set_format_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    if args.length() < 2 {
+        let msg = v8::String::new(
+            scope,
+            "variant.set_format(tag, values) requires 2 arguments",
+        )
+        .unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let tag = args.get(0);
+    let Ok(tag_str) = v8::Local::<v8::String>::try_from(tag) else {
+        let msg = v8::String::new(scope, "variant.set_format tag must be a string").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+    let tag = tag_str.to_rust_string_lossy(scope);
+
+    // Reject GT field
+    if tag == "GT" {
+        let msg = v8::String::new(
+            scope,
+            "GT cannot be set via set_format; use dedicated genotype methods",
+        )
+        .unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+        return;
+    }
+
+    let Some(header_data) = this.get_internal_field(scope, HEADER_INTERNAL_FIELD_INDEX) else {
+        let msg = v8::String::new(scope, "variant has no header").unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+        return;
+    };
+    let Ok(header_obj) = v8::Local::<v8::Object>::try_from(header_data) else {
+        let msg = v8::String::new(scope, "variant has invalid header").unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+        return;
+    };
+
+    let header_wrapper =
+        unsafe { v8::Object::unwrap::<{ header::HEADER_TAG }, header::Header>(scope, header_obj) }
+            .expect("Failed to unwrap Header");
+    let header: &header::Header = unsafe { header_wrapper.as_ref() };
+
+    let (tag_type, _tag_length) = match header.format_type(tag.as_bytes()) {
+        Some(v) => v,
+        None => {
+            let msg = v8::String::new(scope, &format!("undefined FORMAT tag: {tag}")).unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        }
+    };
+
+    let value = args.get(1);
+
+    // Check for clear (null/undefined at top level)
+    if value.is_null_or_undefined() {
+        let record = variant.record_mut(scope);
+        if let Err(e) = htsvcf_core::record_clear_format(record, header.inner(), &tag) {
+            let msg =
+                v8::String::new(scope, &format!("failed to clear format {tag}: {e}")).unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+        }
+        return;
+    }
+
+    // Value must be an array (one entry per sample)
+    let Ok(arr) = v8::Local::<v8::Array>::try_from(value) else {
+        let msg = v8::String::new(scope, "variant.set_format values must be an array").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    let sample_count = variant.record(scope).sample_count();
+    if arr.length() != sample_count {
+        let msg = v8::String::new(
+            scope,
+            &format!(
+                "variant.set_format array length ({}) must match sample count ({})",
+                arr.length(),
+                sample_count
+            ),
+        )
+        .unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+        return;
+    }
+
+    // Missing value sentinels
+    let missing_int = htsvcf_core::format_int_missing();
+    let missing_float = htsvcf_core::format_float_missing();
+
+    let res = match tag_type {
+        TagType::Integer => {
+            let mut flattened: Vec<i32> = Vec::new();
+            for i in 0..arr.length() {
+                let Some(sample_val) = arr.get_index(scope, i) else {
+                    flattened.push(missing_int);
+                    continue;
+                };
+                if sample_val.is_null_or_undefined() {
+                    flattened.push(missing_int);
+                } else if let Ok(inner_arr) = v8::Local::<v8::Array>::try_from(sample_val) {
+                    // Nested array: multiple values per sample
+                    for j in 0..inner_arr.length() {
+                        let Some(v) = inner_arr.get_index(scope, j) else {
+                            flattened.push(missing_int);
+                            continue;
+                        };
+                        if v.is_null_or_undefined() {
+                            flattened.push(missing_int);
+                        } else if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
+                            let f = n.value();
+                            if !f.is_finite() || f.fract() != 0.0 {
+                                let msg = v8::String::new(
+                                    scope,
+                                    "integer FORMAT values must be integers",
+                                )
+                                .unwrap();
+                                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                                return;
+                            }
+                            flattened.push(f as i32);
+                        } else {
+                            let msg = v8::String::new(
+                                scope,
+                                "integer FORMAT values must be numbers or null",
+                            )
+                            .unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        }
+                    }
+                } else if let Ok(n) = v8::Local::<v8::Number>::try_from(sample_val) {
+                    // Scalar value
+                    let f = n.value();
+                    if !f.is_finite() || f.fract() != 0.0 {
+                        let msg = v8::String::new(scope, "integer FORMAT values must be integers")
+                            .unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    }
+                    flattened.push(f as i32);
+                } else {
+                    let msg =
+                        v8::String::new(scope, "integer FORMAT values must be numbers or null")
+                            .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+            let record = variant.record_mut(scope);
+            htsvcf_core::record_set_format_integer(record, header.inner(), &tag, &flattened)
+        }
+        TagType::Float => {
+            let mut flattened: Vec<f32> = Vec::new();
+            for i in 0..arr.length() {
+                let Some(sample_val) = arr.get_index(scope, i) else {
+                    flattened.push(missing_float);
+                    continue;
+                };
+                if sample_val.is_null_or_undefined() {
+                    flattened.push(missing_float);
+                } else if let Ok(inner_arr) = v8::Local::<v8::Array>::try_from(sample_val) {
+                    // Nested array: multiple values per sample
+                    for j in 0..inner_arr.length() {
+                        let Some(v) = inner_arr.get_index(scope, j) else {
+                            flattened.push(missing_float);
+                            continue;
+                        };
+                        if v.is_null_or_undefined() {
+                            flattened.push(missing_float);
+                        } else if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
+                            let f = n.value();
+                            if !f.is_finite() {
+                                let msg =
+                                    v8::String::new(scope, "float FORMAT values must be finite")
+                                        .unwrap();
+                                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                                return;
+                            }
+                            flattened.push(f as f32);
+                        } else {
+                            let msg = v8::String::new(
+                                scope,
+                                "float FORMAT values must be numbers or null",
+                            )
+                            .unwrap();
+                            scope.throw_exception(v8::Exception::type_error(scope, msg));
+                            return;
+                        }
+                    }
+                } else if let Ok(n) = v8::Local::<v8::Number>::try_from(sample_val) {
+                    // Scalar value
+                    let f = n.value();
+                    if !f.is_finite() {
+                        let msg =
+                            v8::String::new(scope, "float FORMAT values must be finite").unwrap();
+                        scope.throw_exception(v8::Exception::type_error(scope, msg));
+                        return;
+                    }
+                    flattened.push(f as f32);
+                } else {
+                    let msg = v8::String::new(scope, "float FORMAT values must be numbers or null")
+                        .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+            let record = variant.record_mut(scope);
+            htsvcf_core::record_set_format_float(record, header.inner(), &tag, &flattened)
+        }
+        TagType::String => {
+            let mut strings: Vec<String> = Vec::new();
+            for i in 0..arr.length() {
+                let Some(sample_val) = arr.get_index(scope, i) else {
+                    strings.push(".".to_string());
+                    continue;
+                };
+                if sample_val.is_null_or_undefined() {
+                    strings.push(".".to_string());
+                } else if let Ok(s) = v8::Local::<v8::String>::try_from(sample_val) {
+                    strings.push(s.to_rust_string_lossy(scope));
+                } else {
+                    let msg =
+                        v8::String::new(scope, "string FORMAT values must be strings or null")
+                            .unwrap();
+                    scope.throw_exception(v8::Exception::type_error(scope, msg));
+                    return;
+                }
+            }
+            let record = variant.record_mut(scope);
+            htsvcf_core::record_set_format_string(record, header.inner(), &tag, &strings)
+        }
+        TagType::Flag => Err(rust_htslib::errors::Error::BcfSetTag {
+            tag: format!("FORMAT/{tag} is a Flag type which is not supported"),
+        }),
+    };
+
+    if let Err(e) = res {
+        let msg = v8::String::new(scope, &format!("failed to set format {tag}: {e}")).unwrap();
         scope.throw_exception(v8::Exception::error(scope, msg));
     }
 }
@@ -1498,5 +1766,162 @@ chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
             eval_js(&path, "variant.sample('diploid_phased').genotype.phase[0]"),
             "true"
         );
+    }
+
+    #[test]
+    /// `variant.set_format()` should mutate FORMAT fields.
+    fn test_js_set_format() {
+        let path = tmp_path("set_format.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##FORMAT=<ID=AF,Number=1,Type=Float,Description=\"Allele Freq\">\n\
+##FORMAT=<ID=NOTE,Number=1,Type=String,Description=\"Note\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT:DP:AF:NOTE\t0/1:10:0.1:a\t1/1:20:0.2:b\t0/0:30:0.3:c\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Test setting integer FORMAT field
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('DP', [100, 200, 300]); variant.format('DP')[0]"
+            ),
+            "100"
+        );
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('DP', [100, 200, 300]); variant.format('DP')[2]"
+            ),
+            "300"
+        );
+
+        // Test setting float FORMAT field
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('AF', [0.5, 0.6, 0.7]); Math.abs(variant.format('AF')[0] - 0.5) < 1e-6"
+            ),
+            "true"
+        );
+
+        // Test setting string FORMAT field
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('NOTE', ['hello', 'world', 'foo']); variant.format('NOTE')[1]"
+            ),
+            "world"
+        );
+
+        // Test setting with null (missing)
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('DP', [100, null, 300]); variant.format('DP')[1] === null"
+            ),
+            "true"
+        );
+
+        // Test clearing a FORMAT field
+        assert_eq!(
+            eval_js(path, "variant.set_format('DP', null); variant.format('DP')"),
+            "undefined"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `variant.set_format()` should handle nested arrays for multi-value fields.
+    fn test_js_set_format_nested_arrays() {
+        let path = tmp_path("set_format_nested.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allele depths\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tAD\t5,10\t8,12\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Set AD with nested arrays (2 samples, 2 values each)
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('AD', [[100, 200], [300, 400]]); variant.format('AD')[0][0]"
+            ),
+            "100"
+        );
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('AD', [[100, 200], [300, 400]]); variant.format('AD')[0][1]"
+            ),
+            "200"
+        );
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_format('AD', [[100, 200], [300, 400]]); variant.format('AD')[1][0]"
+            ),
+            "300"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `variant.set_format()` should reject GT field.
+    fn test_js_set_format_rejects_gt() {
+        let path = tmp_path("set_format_gt.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Should throw an error when trying to set GT
+        let result = eval_js(
+            path,
+            "try { variant.set_format('GT', ['0/0']); 'no-error' } catch(e) { 'error:' + e.message.includes('GT') }"
+        );
+        assert!(
+            result.contains("error:true"),
+            "Expected GT rejection error, got: {}",
+            result
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `variant.set_format()` should validate array length matches sample count.
+    fn test_js_set_format_validates_length() {
+        let path = tmp_path("set_format_len.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\t30\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Should throw an error when array length doesn't match sample count
+        let result = eval_js(
+            path,
+            "try { variant.set_format('DP', [100, 200]); 'no-error' } catch(e) { 'error:' + e.message.includes('sample count') }"
+        );
+        assert!(
+            result.contains("error:true"),
+            "Expected length validation error, got: {}",
+            result
+        );
+
+        let _ = fs::remove_file(path);
     }
 }

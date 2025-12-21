@@ -235,6 +235,50 @@ console.log("samples()[0].genotype:", allGtSamples[0].genotype);
 
 gtReader.close();
 
+// set_format smoke test
+const setFormatVcfPath = path.join(tmpDir, "set_format.vcf");
+await fs.writeFile(
+  setFormatVcfPath,
+  [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    '##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Quality">',
+    '##FORMAT=<ID=FT,Number=1,Type=String,Description="Filter">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t10\t.\tA\tC\t.\t.\t.\tDP:GQ:FT\t10:1.5:PASS\t20:2.5:FAIL",
+    "",
+  ].join("\n"),
+);
+
+const fmtReader = new Reader(setFormatVcfPath);
+const fmtRec = fmtReader.nextSync();
+assert.ok(fmtRec.value);
+
+// Test set_format integer
+fmtRec.value.set_format("DP", [99, 88]);
+assert.deepEqual(fmtRec.value.format("DP"), [99, 88]);
+console.log("set_format DP:", fmtRec.value.format("DP"));
+
+// Test set_format float
+fmtRec.value.set_format("GQ", [3.14, 2.71]);
+const gqVals = fmtRec.value.format("GQ");
+assert.ok(Math.abs(gqVals[0] - 3.14) < 0.01);
+assert.ok(Math.abs(gqVals[1] - 2.71) < 0.01);
+console.log("set_format GQ:", gqVals);
+
+// Test set_format string
+fmtRec.value.set_format("FT", ["PASS", "LowQual"]);
+assert.deepEqual(fmtRec.value.format("FT"), ["PASS", "LowQual"]);
+console.log("set_format FT:", fmtRec.value.format("FT"));
+
+// Test set_format clear (null)
+fmtRec.value.set_format("DP", null);
+assert.equal(fmtRec.value.format("DP"), undefined);
+console.log("set_format DP cleared:", fmtRec.value.format("DP"));
+
+fmtReader.close();
+
 reader.close();
 filterReader.close();
 setInfoReader.close();

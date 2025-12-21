@@ -145,9 +145,10 @@ pub mod writer;
 pub use header::Header;
 pub use reader::{open_reader, InnerReader, Reader};
 pub use variant::{
-    get_format_tag_names, record_clear_info, record_format, record_genotypes, record_info,
-    record_sample, record_samples, record_set_info_flag, record_set_info_float,
-    record_set_info_integer, record_set_info_string, record_to_string, FormatValue, Genotype,
-    InfoValue, Variant,
+    format_float_missing, format_int_missing, get_format_tag_names, record_clear_format,
+    record_clear_info, record_format, record_genotypes, record_info, record_sample, record_samples,
+    record_set_format_float, record_set_format_integer, record_set_format_string,
+    record_set_info_flag, record_set_info_float, record_set_info_integer, record_set_info_string,
+    record_to_string, FormatValue, Genotype, InfoValue, Variant,
 };
 pub use writer::{open_writer, OutputFormat, Writer, WriterOptions};

@@ -566,6 +566,11 @@ variant.format('GT')         // [[0, 1], [1, 1]] (genotypes per sample)
 variant.format('DP')         // [20, 15] (depth per sample)
 variant.format('AD')         // [[10, 10], [5, 10]] (allele depths per sample)
 
+// Modify FORMAT fields (array with one value per sample)
+variant.set_format('DP', [25, 30])
+variant.set_format('AD', [[10, 15], [20, 10]])
+variant.set_format('DP', null)  // clear the field
+
 // Single sample access (returns object with all FORMAT fields)
 const s = variant.sample('NA12878')
 s.sample_name                // "NA12878"
