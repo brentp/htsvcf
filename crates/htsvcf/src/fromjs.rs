@@ -173,7 +173,10 @@ impl FromJsValue for usize {
                 .to_string(scope)
                 .map(|s| s.to_rust_string_lossy(scope))
                 .unwrap_or_else(|| "<unknown>".into());
-            return Err(format!("expected usize, got '{}'", truncate_for_error(&repr)));
+            return Err(format!(
+                "expected usize, got '{}'",
+                truncate_for_error(&repr)
+            ));
         }
         let n = value.integer_value(scope).ok_or_else(|| {
             let repr = value

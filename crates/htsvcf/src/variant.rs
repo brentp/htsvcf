@@ -174,10 +174,7 @@ impl Variant {
     /// Get a reference to the record, panicking if taken.
     #[inline]
     fn record<'a>(&'a self, scope: &'a v8::PinScope<'_, '_>) -> &'a bcf::Record {
-        self.record
-            .get(scope)
-            .as_ref()
-            .expect("record was taken")
+        self.record.get(scope).as_ref().expect("record was taken")
     }
 
     /// Get a mutable reference to the record, panicking if taken.
@@ -271,11 +268,7 @@ impl Variant {
     /// Set the QUAL field.
     ///
     /// Pass `None` to set QUAL to missing.
-    pub fn set_qual(
-        &self,
-        scope: &mut v8::PinScope<'_, '_>,
-        qual: Option<f32>,
-    ) {
+    pub fn set_qual(&self, scope: &mut v8::PinScope<'_, '_>, qual: Option<f32>) {
         let record = self.record_mut(scope);
         match qual {
             Some(v) => record.set_qual(v),
@@ -306,7 +299,8 @@ impl Variant {
         filters: &[String],
     ) -> Result<(), rust_htslib::errors::Error> {
         let record = self.record_mut(scope);
-        let want_clear = filters.is_empty() || (filters.len() == 1 && (filters[0].is_empty() || filters[0] == "."));
+        let want_clear = filters.is_empty()
+            || (filters.len() == 1 && (filters[0].is_empty() || filters[0] == "."));
         if want_clear {
             let refs: Vec<&[u8]> = Vec::new();
             record.set_filters(&refs)?;
@@ -492,8 +486,7 @@ fn attr_setter(
             };
             let id = v.to_rust_string_lossy(scope);
             if let Err(e) = variant.set_id(scope, &id) {
-                let msg = v8::String::new(scope, &format!("failed to set id: {e}"))
-                    .unwrap();
+                let msg = v8::String::new(scope, &format!("failed to set id: {e}")).unwrap();
                 scope.throw_exception(v8::Exception::error(scope, msg));
             }
         }
@@ -503,8 +496,7 @@ fn attr_setter(
                 return;
             }
             let Ok(v) = v8::Local::<v8::Number>::try_from(value) else {
-                let msg = v8::String::new(scope, "variant.qual must be a number or null")
-                    .unwrap();
+                let msg = v8::String::new(scope, "variant.qual must be a number or null").unwrap();
                 scope.throw_exception(v8::Exception::type_error(scope, msg));
                 return;
             };
@@ -512,8 +504,8 @@ fn attr_setter(
         }
         b"filter" => {
             let Ok(arr) = v8::Local::<v8::Array>::try_from(value) else {
-                let msg = v8::String::new(scope, "variant.filter must be an array of strings")
-                    .unwrap();
+                let msg =
+                    v8::String::new(scope, "variant.filter must be an array of strings").unwrap();
                 scope.throw_exception(v8::Exception::type_error(scope, msg));
                 return;
             };
@@ -533,8 +525,7 @@ fn attr_setter(
             }
 
             if let Err(e) = variant.set_filters(scope, &filters) {
-                let msg = v8::String::new(scope, &format!("failed to set filter: {e}"))
-                    .unwrap();
+                let msg = v8::String::new(scope, &format!("failed to set filter: {e}")).unwrap();
                 scope.throw_exception(v8::Exception::error(scope, msg));
             }
         }
@@ -613,7 +604,8 @@ fn set_info_fn(
     let variant = unsafe { wrapper.as_ref() };
 
     if args.length() < 2 {
-        let msg = v8::String::new(scope, "variant.set_info(tag, value) requires 2 arguments").unwrap();
+        let msg =
+            v8::String::new(scope, "variant.set_info(tag, value) requires 2 arguments").unwrap();
         scope.throw_exception(v8::Exception::type_error(scope, msg));
         return;
     }
@@ -682,13 +674,16 @@ fn set_info_fn(
                             continue;
                         };
                         let Ok(n) = v8::Local::<v8::Number>::try_from(v) else {
-                            let msg = v8::String::new(scope, "integer INFO requires number array").unwrap();
+                            let msg = v8::String::new(scope, "integer INFO requires number array")
+                                .unwrap();
                             scope.throw_exception(v8::Exception::type_error(scope, msg));
                             return;
                         };
                         let f = n.value();
                         if !f.is_finite() || (f.fract() != 0.0) {
-                            let msg = v8::String::new(scope, "integer INFO values must be integers").unwrap();
+                            let msg =
+                                v8::String::new(scope, "integer INFO values must be integers")
+                                    .unwrap();
                             scope.throw_exception(v8::Exception::type_error(scope, msg));
                             return;
                         }
@@ -697,13 +692,15 @@ fn set_info_fn(
                     InfoWriteValue::Integers(out)
                 } else {
                     let Ok(n) = v8::Local::<v8::Number>::try_from(value) else {
-                        let msg = v8::String::new(scope, "integer INFO requires number value").unwrap();
+                        let msg =
+                            v8::String::new(scope, "integer INFO requires number value").unwrap();
                         scope.throw_exception(v8::Exception::type_error(scope, msg));
                         return;
                     };
                     let f = n.value();
                     if !f.is_finite() || (f.fract() != 0.0) {
-                        let msg = v8::String::new(scope, "integer INFO value must be an integer").unwrap();
+                        let msg = v8::String::new(scope, "integer INFO value must be an integer")
+                            .unwrap();
                         scope.throw_exception(v8::Exception::type_error(scope, msg));
                         return;
                     }
@@ -718,13 +715,15 @@ fn set_info_fn(
                             continue;
                         };
                         let Ok(n) = v8::Local::<v8::Number>::try_from(v) else {
-                            let msg = v8::String::new(scope, "float INFO requires number array").unwrap();
+                            let msg =
+                                v8::String::new(scope, "float INFO requires number array").unwrap();
                             scope.throw_exception(v8::Exception::type_error(scope, msg));
                             return;
                         };
                         let f = n.value();
                         if !f.is_finite() {
-                            let msg = v8::String::new(scope, "float INFO values must be finite").unwrap();
+                            let msg =
+                                v8::String::new(scope, "float INFO values must be finite").unwrap();
                             scope.throw_exception(v8::Exception::type_error(scope, msg));
                             return;
                         }
@@ -733,13 +732,15 @@ fn set_info_fn(
                     InfoWriteValue::Floats(out)
                 } else {
                     let Ok(n) = v8::Local::<v8::Number>::try_from(value) else {
-                        let msg = v8::String::new(scope, "float INFO requires number value").unwrap();
+                        let msg =
+                            v8::String::new(scope, "float INFO requires number value").unwrap();
                         scope.throw_exception(v8::Exception::type_error(scope, msg));
                         return;
                     };
                     let f = n.value();
                     if !f.is_finite() {
-                        let msg = v8::String::new(scope, "float INFO value must be finite").unwrap();
+                        let msg =
+                            v8::String::new(scope, "float INFO value must be finite").unwrap();
                         scope.throw_exception(v8::Exception::type_error(scope, msg));
                         return;
                     }
@@ -754,7 +755,8 @@ fn set_info_fn(
                             continue;
                         };
                         let Ok(s) = v8::Local::<v8::String>::try_from(v) else {
-                            let msg = v8::String::new(scope, "string INFO requires string array").unwrap();
+                            let msg = v8::String::new(scope, "string INFO requires string array")
+                                .unwrap();
                             scope.throw_exception(v8::Exception::type_error(scope, msg));
                             return;
                         };
@@ -763,7 +765,8 @@ fn set_info_fn(
                     InfoWriteValue::Strings(strings)
                 } else {
                     let Ok(s) = v8::Local::<v8::String>::try_from(value) else {
-                        let msg = v8::String::new(scope, "string INFO requires string value").unwrap();
+                        let msg =
+                            v8::String::new(scope, "string INFO requires string value").unwrap();
                         scope.throw_exception(v8::Exception::type_error(scope, msg));
                         return;
                     };
@@ -784,13 +787,17 @@ fn set_info_fn(
             },
             (TagType::Flag, InfoWriteValue::Flag(true)) => record.push_info_flag(tag_bytes),
             (TagType::Flag, InfoWriteValue::Flag(false)) => record.clear_info_flag(tag_bytes),
-            (TagType::Integer, InfoWriteValue::Integers(v)) => record.push_info_integer(tag_bytes, &v),
+            (TagType::Integer, InfoWriteValue::Integers(v)) => {
+                record.push_info_integer(tag_bytes, &v)
+            }
             (TagType::Float, InfoWriteValue::Floats(v)) => record.push_info_float(tag_bytes, &v),
             (TagType::String, InfoWriteValue::Strings(v)) => {
                 let refs: Vec<&[u8]> = v.iter().map(|s| s.as_bytes()).collect();
                 record.push_info_string(tag_bytes, &refs)
             }
-            _ => Err(rust_htslib::errors::Error::BcfSetTag { tag: tag.to_string() }),
+            _ => Err(rust_htslib::errors::Error::BcfSetTag {
+                tag: tag.to_string(),
+            }),
         };
         record.unpack();
         out
@@ -1002,7 +1009,9 @@ fn samples_fn(
     };
 
     let record = variant.record(scope);
-    let subset_refs: Option<Vec<&str>> = subset_names.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+    let subset_refs: Option<Vec<&str>> = subset_names
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
     let results = htsvcf_core::record_samples(record, header.inner(), subset_refs.as_deref());
 
     // Convert to V8 array of objects
@@ -1077,7 +1086,9 @@ fn genotypes_fn(
     };
 
     let record = variant.record(scope);
-    let subset_refs: Option<Vec<&str>> = subset_names.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+    let subset_refs: Option<Vec<&str>> = subset_names
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
     let genotypes = htsvcf_core::record_genotypes(record, header.inner(), subset_refs.as_deref());
 
     // Convert to V8 array of genotype objects
@@ -1162,10 +1173,9 @@ mod tests {
         let record = reader.records().next().unwrap().unwrap();
         let record = Variant::from_record(record);
 
-        let header_obj = crate::header::create_header_object(
-            scope,
-            unsafe { crate::header::Header::new(reader.header().inner) },
-        );
+        let header_obj = crate::header::create_header_object(scope, unsafe {
+            crate::header::Header::new(reader.header().inner)
+        });
 
         let code = v8::String::new(scope, js_expr).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
@@ -1255,9 +1265,15 @@ mod tests {
 
         assert_eq!(eval_js(&path, "variant.id = 'rs1'; variant.id"), "rs1");
         assert_eq!(eval_js(&path, "variant.qual = 42; variant.qual"), "42");
-        assert_eq!(eval_js(&path, "variant.qual = null; variant.qual === null"), "true");
+        assert_eq!(
+            eval_js(&path, "variant.qual = null; variant.qual === null"),
+            "true"
+        );
 
-        assert_eq!(eval_js(&path, "variant.filter = ['PASS']; variant.filter.length"), "1");
+        assert_eq!(
+            eval_js(&path, "variant.filter = ['PASS']; variant.filter.length"),
+            "1"
+        );
     }
 
     #[test]
@@ -1310,13 +1326,22 @@ chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
         fs::write(&path, vcf).unwrap();
         let path = path.to_str().unwrap();
 
-        assert_eq!(eval_js(path, "variant.set_info('DP', 32); variant.info('DP')"), "32");
         assert_eq!(
-            eval_js(path, "variant.set_info('AD', [1, 2]); variant.info('AD')[1]"),
+            eval_js(path, "variant.set_info('DP', 32); variant.info('DP')"),
+            "32"
+        );
+        assert_eq!(
+            eval_js(
+                path,
+                "variant.set_info('AD', [1, 2]); variant.info('AD')[1]"
+            ),
             "2"
         );
         assert_eq!(
-            eval_js(path, "variant.set_info('AF', [0.1, 0.2]); Math.abs(variant.info('AF')[0] - 0.1) < 1e-6"),
+            eval_js(
+                path,
+                "variant.set_info('AF', [0.1, 0.2]); Math.abs(variant.info('AF')[0] - 0.1) < 1e-6"
+            ),
             "true"
         );
         assert_eq!(
@@ -1324,7 +1349,10 @@ chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
             "hi"
         );
         assert_eq!(
-            eval_js(path, "variant.set_info('SOMATIC', true); variant.info('SOMATIC')"),
+            eval_js(
+                path,
+                "variant.set_info('SOMATIC', true); variant.info('SOMATIC')"
+            ),
             "true"
         );
 
@@ -1387,7 +1415,6 @@ chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
 
         let _ = fs::remove_file(path);
     }
-
 
     #[test]
     /// `variant.toString()` should return the formatted VCF line.
@@ -1454,11 +1481,22 @@ chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
 
         // Test genotypes(subset)
         assert_eq!(eval_js(&path, "variant.genotypes(['haploid']).length"), "1");
-        assert_eq!(eval_js(&path, "variant.genotypes(['haploid'])[0].alleles[0]"), "1");
+        assert_eq!(
+            eval_js(&path, "variant.genotypes(['haploid'])[0].alleles[0]"),
+            "1"
+        );
 
         // Test sample().genotype
-        assert_eq!(eval_js(&path, "variant.sample('diploid_phased').genotype.alleles[0]"), "1");
-        assert_eq!(eval_js(&path, "variant.sample('diploid_phased').genotype.phase[0]"), "true");
+        assert_eq!(
+            eval_js(
+                &path,
+                "variant.sample('diploid_phased').genotype.alleles[0]"
+            ),
+            "1"
+        );
+        assert_eq!(
+            eval_js(&path, "variant.sample('diploid_phased').genotype.phase[0]"),
+            "true"
+        );
     }
 }
-

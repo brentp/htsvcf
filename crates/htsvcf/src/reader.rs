@@ -31,7 +31,9 @@
 use htsvcf_core::reader::{open_reader, Reader as CoreReader};
 
 use crate::header::{create_header_object, Header};
-use crate::variant::{create_object_template as create_variant_template, create_variant_object, Variant};
+use crate::variant::{
+    create_object_template as create_variant_template, create_variant_object, Variant,
+};
 
 pub const READER_TAG: u16 = 3;
 const READER_TYPE_NAME: &[u8] = b"Reader\0";
@@ -133,7 +135,8 @@ fn reader_header_fn(
     mut rv: v8::ReturnValue,
 ) {
     let this = args.this();
-    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) }) else {
+    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) })
+    else {
         rv.set(v8::undefined(scope).into());
         return;
     };
@@ -153,7 +156,8 @@ fn reader_has_index_fn(
     mut rv: v8::ReturnValue,
 ) {
     let this = args.this();
-    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) }) else {
+    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) })
+    else {
         rv.set(v8::Boolean::new(scope, false).into());
         return;
     };
@@ -178,7 +182,8 @@ fn reader_next_fn(
     mut rv: v8::ReturnValue,
 ) {
     let this = args.this();
-    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) }) else {
+    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) })
+    else {
         rv.set(v8::undefined(scope).into());
         return;
     };
@@ -199,7 +204,12 @@ fn reader_next_fn(
     let inner = reader.inner.get_mut(scope);
     match inner.next_record() {
         Ok(None) => {
-            set_kv(scope, &result_obj, "done", v8::Boolean::new(scope, true).into());
+            set_kv(
+                scope,
+                &result_obj,
+                "done",
+                v8::Boolean::new(scope, true).into(),
+            );
             set_kv(scope, &result_obj, "value", v8::undefined(scope).into());
             rv.set(result_obj.into());
         }
@@ -207,7 +217,12 @@ fn reader_next_fn(
             let variant = Variant::from_record(record);
             let variant_obj = create_variant_object(scope, variant_template, variant, header_obj);
 
-            set_kv(scope, &result_obj, "done", v8::Boolean::new(scope, false).into());
+            set_kv(
+                scope,
+                &result_obj,
+                "done",
+                v8::Boolean::new(scope, false).into(),
+            );
             set_kv(scope, &result_obj, "value", variant_obj.into());
             rv.set(result_obj.into());
         }
@@ -223,7 +238,8 @@ fn reader_query_fn(
     mut rv: v8::ReturnValue,
 ) {
     let this = args.this();
-    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) }) else {
+    let Some(wrapper) = (unsafe { v8::Object::unwrap::<READER_TAG, ReaderWrapper>(scope, this) })
+    else {
         rv.set(v8::undefined(scope).into());
         return;
     };
@@ -287,7 +303,12 @@ fn reader_query_fn(
     }
 }
 
-fn set_kv(scope: &mut v8::PinScope<'_, '_>, obj: &v8::Local<v8::Object>, key: &str, value: v8::Local<v8::Value>) {
+fn set_kv(
+    scope: &mut v8::PinScope<'_, '_>,
+    obj: &v8::Local<v8::Object>,
+    key: &str,
+    value: v8::Local<v8::Value>,
+) {
     let k = v8::String::new(scope, key).unwrap();
     obj.set(scope, k.into(), value);
 }
@@ -308,15 +329,24 @@ pub(crate) fn create_reader_constructor<'a>(
 
     // Reader.prototype.next()
     let next_key = v8::String::new(scope, "next").unwrap();
-    proto.set(next_key.into(), v8::FunctionTemplate::new(scope, reader_next_fn).into());
+    proto.set(
+        next_key.into(),
+        v8::FunctionTemplate::new(scope, reader_next_fn).into(),
+    );
 
     // Reader.prototype[Symbol.iterator] = function() { return this; }
     let iterator = v8::Symbol::get_iterator(scope);
-    proto.set(iterator.into(), v8::FunctionTemplate::new(scope, reader_iterator_fn).into());
+    proto.set(
+        iterator.into(),
+        v8::FunctionTemplate::new(scope, reader_iterator_fn).into(),
+    );
 
     // Reader.prototype.query(...)
     let query_key = v8::String::new(scope, "query").unwrap();
-    proto.set(query_key.into(), v8::FunctionTemplate::new(scope, reader_query_fn).into());
+    proto.set(
+        query_key.into(),
+        v8::FunctionTemplate::new(scope, reader_query_fn).into(),
+    );
 
     // Reader.prototype.hasIndex()
     let has_index_key = v8::String::new(scope, "hasIndex").unwrap();
@@ -327,7 +357,10 @@ pub(crate) fn create_reader_constructor<'a>(
 
     // Reader.prototype.header()
     let header_key = v8::String::new(scope, "header").unwrap();
-    proto.set(header_key.into(), v8::FunctionTemplate::new(scope, reader_header_fn).into());
+    proto.set(
+        header_key.into(),
+        v8::FunctionTemplate::new(scope, reader_header_fn).into(),
+    );
 
     function_template
         .get_function(scope)

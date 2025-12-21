@@ -30,9 +30,9 @@
 use rust_htslib::bcf::{self, Read};
 
 use crate::header::{create_header_object, Header};
+use crate::reader;
 use crate::runtime;
 use crate::variant::{create_object_template, create_variant_object, Variant};
-use crate::reader;
 use crate::writer;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;

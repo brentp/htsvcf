@@ -565,7 +565,10 @@ chr1\t1\t.\tA\tC\t.\t.\tDP=7\tGT\t0/1\t0/0\t1/1\n";
         assert_eq!(eval_header_js(path, "header.samples()[0]"), "S1");
         assert_eq!(eval_header_js(path, "header.samples()[1]"), "S2");
         assert_eq!(eval_header_js(path, "header.samples()[2]"), "S3");
-        assert_eq!(eval_header_js(path, "header.samples().join(',')"), "S1,S2,S3");
+        assert_eq!(
+            eval_header_js(path, "header.samples().join(',')"),
+            "S1,S2,S3"
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -583,7 +586,10 @@ chr1\t1\t.\tA\tC\t.\t.\tDP=7\n";
         let path = path.to_str().unwrap();
 
         assert_eq!(eval_header_js(path, "header.samples().length"), "0");
-        assert_eq!(eval_header_js(path, "Array.isArray(header.samples())"), "true");
+        assert_eq!(
+            eval_header_js(path, "Array.isArray(header.samples())"),
+            "true"
+        );
 
         let _ = fs::remove_file(path);
     }

@@ -242,7 +242,6 @@ impl Evaluator {
         Ok(Arc::new(bcf::header::HeaderView::new(dup)))
     }
 
-
     /// Set the current record for evaluation.
     ///
     /// Takes ownership of the record. The record can later be retrieved with
@@ -1121,8 +1120,7 @@ mod tests {
         let record = reader.records().next().unwrap().unwrap();
         js_eval.set_record(record);
 
-        let result: Result<String, EvalError> =
-            js_eval.eval("this is not valid javascript {{{{");
+        let result: Result<String, EvalError> = js_eval.eval("this is not valid javascript {{{{");
         assert!(result.is_err());
         match result {
             Err(EvalError::CompileError(msg)) => {
@@ -1221,8 +1219,7 @@ mod tests {
         assert_eq!(js_eval.scripts.len(), MAX_CACHED_EXPRESSIONS);
 
         // Next unique expression should fail
-        let result: Result<i64, EvalError> =
-            js_eval.eval("variant.pos + 999999");
+        let result: Result<i64, EvalError> = js_eval.eval("variant.pos + 999999");
         assert!(matches!(result, Err(EvalError::CacheFull)));
     }
 
@@ -1522,9 +1519,7 @@ mod tests {
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add a simple function
-        js_eval
-            .run("function double(x) { return x * 2 }")
-            .unwrap();
+        js_eval.run("function double(x) { return x * 2 }").unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
         js_eval.set_record(record);
@@ -1597,9 +1592,7 @@ mod tests {
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
         // Add script before setting any record (should work)
-        js_eval
-            .run("function add(a, b) { return a + b }")
-            .unwrap();
+        js_eval.run("function add(a, b) { return a + b }").unwrap();
 
         let record = reader.records().next().unwrap().unwrap();
         js_eval.set_record(record);
@@ -1649,9 +1642,7 @@ mod tests {
         let mut reader = bcf::Reader::from_path(&path).unwrap();
         let mut js_eval = Evaluator::new(reader.header()).unwrap();
 
-        js_eval
-            .run("function getPos(v) { return v.pos }")
-            .unwrap();
+        js_eval.run("function getPos(v) { return v.pos }").unwrap();
 
         let mut positions = Vec::new();
         for result in reader.records().take(3) {
@@ -1958,7 +1949,10 @@ mod tests {
         js_eval.set("max_dp", 100i32).unwrap();
         js_eval.set("sample_name", "NA12878").unwrap();
         js_eval
-            .set("allowed_chroms", vec!["chr1".to_string(), "chr2".to_string()])
+            .set(
+                "allowed_chroms",
+                vec!["chr1".to_string(), "chr2".to_string()],
+            )
             .unwrap();
 
         let record = reader.records().next().unwrap().unwrap();

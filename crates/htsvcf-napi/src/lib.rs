@@ -982,7 +982,6 @@ impl Header {
         let mut out = Vec::new();
         for (section, field) in self.inner.all_fields() {
             let mut o: Object<'static> = Object::new(&env)?;
-            // TODO: name this to "section" instead of "type"
             o.set_named_property("type", section)?;
             o.set_named_property("id", field.id)?;
             o.set_named_property("number", field.number)?;
