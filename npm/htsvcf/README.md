@@ -255,6 +255,7 @@ if (s1) {
   console.log(s1.DP);          // 10
   console.log(s1.AD);          // [8, 2]
   console.log(s1.GT);          // "0/1"
+  console.log(s1.genotype);    // { alleles: [0, 1], phase: [false] }
 }
 
 // Get all samples
@@ -265,6 +266,13 @@ for (const sample of allSamples) {
 
 // Get a subset of samples
 const subset = variant.samples(["S1", "S3"]);
+
+// Get parsed genotypes (alleles and phase info)
+const gts = variant.genotypes();
+// [{ alleles: [0, 1], phase: [false] }, { alleles: [1, 1], phase: [true] }, ...]
+
+// Genotypes for a subset of samples
+const gtSubset = variant.genotypes(["S1", "S2"]);
 ```
 
 #### String Representation

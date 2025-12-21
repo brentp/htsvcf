@@ -111,6 +111,35 @@ pub enum FormatValue {
   Array(Vec<FormatValue>),
   /// Per-sample values, one entry per sample in the VCF.
   PerSample(Vec<FormatValue>),
+  /// A parsed genotype value (for the GT field).
+  Genotype(Genotype),
+}
+
+/// A parsed genotype for a single sample.
+///
+/// This struct represents the GT field parsed into structured data:
+/// - `alleles`: Allele indices where `None` represents missing (`.`)
+/// - `phase`: Phasing information for each allele after the first.
+///   `phase[i]` is `true` if there's a `|` separator before `alleles[i+1]`,
+///   `false` if there's a `/` separator.
+///
+/// # Examples
+///
+/// | GT String | alleles | phase |
+/// |-----------|---------|-------|
+/// | `0/1` | `[Some(0), Some(1)]` | `[false]` |
+/// | `1\|1` | `[Some(1), Some(1)]` | `[true]` |
+/// | `./1` | `[None, Some(1)]` | `[false]` |
+/// | `1` | `[Some(1)]` | `[]` |
+/// | `0/1\|2` | `[Some(0), Some(1), Some(2)]` | `[false, true]` |
+#[derive(Debug, Clone, PartialEq)]
+pub struct Genotype {
+  /// Allele indices. `None` represents a missing allele (`.`).
+  pub alleles: Vec<Option<i32>>,
+  /// Phase separators. `phase[i]` indicates whether `alleles[i+1]` is phased
+  /// with `alleles[i]` (`true` = `|`, `false` = `/`).
+  /// Length is always `alleles.len() - 1` (or 0 for haploid).
+  pub phase: Vec<bool>,
 }
 
 // ============================================================================
@@ -216,13 +245,18 @@ pub fn record_sample(
   }
 
   let format_tags = get_format_tag_names(header, record);
-  let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(format_tags.len() + 1);
+  let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(format_tags.len() + 2);
 
   for (tag_name, tag_bytes) in format_tags {
     let Some(value) = format_value_for_sample(header, record, &tag_bytes, sample_id) else {
       continue;
     };
     out.push((tag_name, value));
+  }
+
+  // Add parsed genotype if GT field exists
+  if let Some(gt) = parse_genotype_for_sample(record, sample_id) {
+    out.push(("genotype".to_string(), FormatValue::Genotype(gt)));
   }
 
   // Include the sample name so JS bindings can expose it.
@@ -320,6 +354,14 @@ pub fn record_samples(
     }
   }
 
+  // Add parsed genotypes if GT field exists
+  if let Ok(gts) = record.genotypes() {
+    for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+      let gt = parse_genotype(&gts.get(sample_idx));
+      results[result_idx].push(("genotype".to_string(), FormatValue::Genotype(gt)));
+    }
+  }
+
   // Add sample_name to each result (last, so it can't be overwritten by a FORMAT tag)
   for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
     let name = sample_names
@@ -390,6 +432,97 @@ pub fn record_to_string(record: &bcf::Record, header: &Header) -> Option<String>
   }
 
   Some(text.trim_end_matches('\n').to_string())
+}
+
+/// Parse genotypes for all samples or a subset of samples.
+///
+/// Returns a vector of [`Genotype`] structs, one per requested sample.
+/// If `subset` is `None`, returns genotypes for all samples in header order.
+/// If `subset` is `Some(names)`, returns genotypes only for those samples
+/// in the order specified (unknown sample names are skipped).
+///
+/// Returns an empty vector if:
+/// - The record has no GT field
+/// - The record has no samples
+/// - None of the requested samples exist
+pub fn record_genotypes(
+  record: &bcf::Record,
+  header: &Header,
+  subset: Option<&[&str]>,
+) -> Vec<Genotype> {
+  let sample_count = record.sample_count() as usize;
+  if sample_count == 0 {
+    return Vec::new();
+  }
+
+  let gts = match record.genotypes() {
+    Ok(g) => g,
+    Err(_) => return Vec::new(),
+  };
+
+  // Determine which sample indices to include
+  let sample_indices: Vec<usize> = match subset {
+    None => (0..sample_count).collect(),
+    Some(names) => {
+      let name_to_idx = header.sample_name_to_idx();
+      names
+        .iter()
+        .filter_map(|name| name_to_idx.get(*name).copied())
+        .collect()
+    }
+  };
+
+  sample_indices
+    .iter()
+    .map(|&idx| parse_genotype(&gts.get(idx)))
+    .collect()
+}
+
+/// Parse a single genotype from rust-htslib's Genotype type.
+fn parse_genotype(gt: &rust_htslib::bcf::record::Genotype) -> Genotype {
+  use rust_htslib::bcf::record::GenotypeAllele;
+
+  let mut alleles: Vec<Option<i32>> = Vec::with_capacity(gt.len());
+  let mut phase: Vec<bool> = Vec::with_capacity(gt.len().saturating_sub(1));
+
+  for (i, allele) in gt.iter().enumerate() {
+    match allele {
+      GenotypeAllele::Unphased(idx) => {
+        alleles.push(Some(*idx));
+        // First allele has no preceding separator, subsequent unphased alleles mean '/'
+        if i > 0 {
+          phase.push(false);
+        }
+      }
+      GenotypeAllele::Phased(idx) => {
+        alleles.push(Some(*idx));
+        // Phased means '|' separator before this allele
+        if i > 0 {
+          phase.push(true);
+        }
+      }
+      GenotypeAllele::UnphasedMissing => {
+        alleles.push(None);
+        if i > 0 {
+          phase.push(false);
+        }
+      }
+      GenotypeAllele::PhasedMissing => {
+        alleles.push(None);
+        if i > 0 {
+          phase.push(true);
+        }
+      }
+    }
+  }
+
+  Genotype { alleles, phase }
+}
+
+/// Parse a single sample's genotype by index.
+fn parse_genotype_for_sample(record: &bcf::Record, sample_idx: usize) -> Option<Genotype> {
+  let gts = record.genotypes().ok()?;
+  Some(parse_genotype(&gts.get(sample_idx)))
 }
 
 /// Set an INFO flag value on a record.
@@ -876,7 +1009,8 @@ impl Variant {
   /// Get all FORMAT field values for a single sample by name.
   ///
   /// Returns a vector of (tag_name, value) pairs for all FORMAT fields present
-  /// in this record, plus a `sample_name` entry with the sample's name.
+  /// in this record, plus a `genotype` entry with the parsed GT and a
+  /// `sample_name` entry with the sample's name.
   /// Returns `None` if the sample is not found.
   pub fn sample(&self, header: &Header, sample: &str) -> Option<Vec<(String, FormatValue)>> {
     let sample_id = header.sample_id(sample.as_bytes())?;
@@ -886,13 +1020,18 @@ impl Variant {
     }
 
     let format_tags = self.get_format_tag_names(header);
-    let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(format_tags.len() + 1);
+    let mut out: Vec<(String, FormatValue)> = Vec::with_capacity(format_tags.len() + 2);
 
     for (tag_name, tag_bytes) in format_tags {
       let Some(value) = format_value_for_sample(header, &self.record, &tag_bytes, sample_id) else {
         continue;
       };
       out.push((tag_name, value));
+    }
+
+    // Add parsed genotype if GT field exists
+    if let Some(gt) = parse_genotype_for_sample(&self.record, sample_id) {
+      out.push(("genotype".to_string(), FormatValue::Genotype(gt)));
     }
 
     // Include the sample name so JS bindings can expose it.
@@ -994,6 +1133,14 @@ impl Variant {
       }
     }
 
+    // Add parsed genotypes if GT field exists
+    if let Ok(gts) = self.record.genotypes() {
+      for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
+        let gt = parse_genotype(&gts.get(sample_idx));
+        results[result_idx].push(("genotype".to_string(), FormatValue::Genotype(gt)));
+      }
+    }
+
     // Add sample_name to each result (last, so it can't be overwritten by a FORMAT tag)
     for (result_idx, &sample_idx) in sample_indices.iter().enumerate() {
       let name = sample_names
@@ -1004,6 +1151,18 @@ impl Variant {
     }
 
     results
+  }
+
+  /// Get parsed genotypes for all samples or a subset.
+  ///
+  /// Returns a vector of [`Genotype`] structs, one per requested sample.
+  /// If `subset` is `None`, returns genotypes for all samples in header order.
+  /// If `subset` is `Some(names)`, returns genotypes only for those samples
+  /// in the order specified (unknown sample names are skipped).
+  ///
+  /// Returns an empty vector if the record has no GT field or no samples.
+  pub fn genotypes(&self, header: &Header, subset: Option<&[&str]>) -> Vec<Genotype> {
+    record_genotypes(&self.record, header, subset)
   }
 
   /// Get the list of FORMAT tag names present in this record.

@@ -11,6 +11,27 @@ export type WriterOptions = {
   threads?: number;
 };
 
+/**
+ * Parsed genotype information for a single sample.
+ *
+ * Examples:
+ * - `0/1` -> `{ alleles: [0, 1], phase: [false] }`
+ * - `1|1` -> `{ alleles: [1, 1], phase: [true] }`
+ * - `./1` -> `{ alleles: [null, 1], phase: [false] }`
+ * - `1` (haploid) -> `{ alleles: [1], phase: [] }`
+ * - `0/1|2` -> `{ alleles: [0, 1, 2], phase: [false, true] }`
+ */
+export type Genotype = {
+  /** Allele indices. `null` represents a missing allele (`.`). */
+  alleles: Array<number | null>;
+  /**
+   * Phase separators. `phase[i]` indicates whether `alleles[i+1]` is phased
+   * with `alleles[i]` (`true` = `|`, `false` = `/`).
+   * Length is always `alleles.length - 1` (or 0 for haploid).
+   */
+  phase: boolean[];
+};
+
 /** VCF/BCF header containing metadata and field definitions. */
 export class Header {
   /** Get all header records (INFO, FORMAT, FILTER, contig, etc.). */
@@ -79,10 +100,12 @@ export class Variant {
   translate(header: Header): void;
   /** Get a FORMAT field value (array with one entry per sample). */
   format(tag: string): Array<boolean | number | string | Array<number | string> | null> | undefined;
-  /** Get all FORMAT fields for a single sample by name. */
-  sample(name: string): ({ sample_name: string } & Record<string, number | string | null | Array<number | string | null>>) | undefined;
-  /** Get all FORMAT fields for all samples, or a subset if specified. */
-  samples(subset?: string[]): Array<{ sample_name: string } & Record<string, number | string | null | Array<number | string | null>>>;
+  /** Get all FORMAT fields for a single sample by name. Includes parsed `genotype` if GT is present. */
+  sample(name: string): ({ sample_name: string; genotype?: Genotype } & Record<string, number | string | null | Array<number | string | null>>) | undefined;
+  /** Get all FORMAT fields for all samples, or a subset if specified. Includes parsed `genotype` if GT is present. */
+  samples(subset?: string[]): Array<{ sample_name: string; genotype?: Genotype } & Record<string, number | string | null | Array<number | string | null>>>;
+  /** Get parsed genotypes for all samples, or a subset if specified. */
+  genotypes(subset?: string[]): Genotype[];
   /** Convert to VCF line (without trailing newline). */
   toString(): string;
 }

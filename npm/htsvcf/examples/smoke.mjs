@@ -185,6 +185,56 @@ console.log(it3.value.samples())
 console.log("samples(['S1']")
 console.log(it3.value.samples(['S1']))
 
+// Genotypes smoke test
+const genotypesVcfPath = path.join(tmpDir, "genotypes.vcf");
+await fs.writeFile(
+  genotypesVcfPath,
+  [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    '##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t10\t.\tA\tC\t.\t.\t.\tGT:DP\t0/1:10\t1|1:20\t./.:5",
+    "",
+  ].join("\n"),
+);
+
+const gtReader = new Reader(genotypesVcfPath);
+const gtRec = gtReader.nextSync();
+assert.ok(gtRec.value);
+
+// Test genotypes()
+const gts = gtRec.value.genotypes();
+assert.ok(Array.isArray(gts));
+assert.equal(gts.length, 3);
+assert.deepEqual(gts[0].alleles, [0, 1]);
+assert.deepEqual(gts[0].phase, [false]);
+assert.deepEqual(gts[1].alleles, [1, 1]);
+assert.deepEqual(gts[1].phase, [true]);
+assert.deepEqual(gts[2].alleles, [null, null]);
+console.log("genotypes():", gts);
+
+// Test genotypes(subset)
+const gtSubset = gtRec.value.genotypes(['S2']);
+assert.equal(gtSubset.length, 1);
+assert.deepEqual(gtSubset[0].alleles, [1, 1]);
+console.log("genotypes(['S2']):", gtSubset);
+
+// Test sample().genotype
+const s1gt = gtRec.value.sample('S1');
+assert.ok(s1gt.genotype);
+assert.deepEqual(s1gt.genotype.alleles, [0, 1]);
+console.log("sample('S1').genotype:", s1gt.genotype);
+
+// Test samples() includes genotype
+const allGtSamples = gtRec.value.samples();
+assert.ok(allGtSamples[0].genotype);
+assert.ok(allGtSamples[1].genotype);
+console.log("samples()[0].genotype:", allGtSamples[0].genotype);
+
+gtReader.close();
+
 reader.close();
 filterReader.close();
 setInfoReader.close();

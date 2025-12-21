@@ -571,6 +571,7 @@ s.sample_name                // "NA12878"
 s.GT                         // [0, 1]
 s.DP                         // 20
 s.AD                         // [10, 10]
+s.genotype                   // { alleles: [0, 1], phase: [false] }
 
 // All samples at once
 const all = variant.samples()
@@ -579,6 +580,13 @@ all[0].DP                    // first sample's depth
 
 // Subset of samples
 const subset = variant.samples(['NA12878', 'NA12879'])
+
+// Parsed genotypes (alleles and phase info)
+const gts = variant.genotypes()
+// [{ alleles: [0, 1], phase: [false] }, { alleles: [1, 1], phase: [true] }, ...]
+
+// Genotypes for a subset of samples
+const gtSubset = variant.genotypes(['NA12878'])
 
 // Output as VCF line
 variant.toString()           // "chr1\t1000\t.\tA\tC\t30\tPASS\tDP=10\t..."

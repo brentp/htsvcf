@@ -36,7 +36,7 @@
 //! ```
 
 use crate::header;
-use htsvcf_core::{FormatValue, InfoValue};
+use htsvcf_core::{FormatValue, Genotype, InfoValue};
 use rust_htslib::bcf;
 use rust_htslib::bcf::header::TagType;
 use rust_htslib::bcf::record::Numeric;
@@ -44,6 +44,42 @@ use rust_htslib::bcf::record::Numeric;
 // ============================================================================
 // Conversion functions from core types to V8 values
 // ============================================================================
+
+/// Convert a Genotype from the core to a V8 object.
+///
+/// Returns an object with:
+/// - `alleles`: Array of numbers (or null for missing)
+/// - `phase`: Array of booleans
+fn genotype_to_v8<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    gt: &Genotype,
+) -> v8::Local<'s, v8::Value> {
+    let obj = v8::Object::new(scope);
+
+    // Build alleles array
+    let alleles_arr = v8::Array::new(scope, gt.alleles.len() as i32);
+    for (i, allele) in gt.alleles.iter().enumerate() {
+        let val: v8::Local<v8::Value> = match allele {
+            Some(n) => v8::Number::new(scope, *n as f64).into(),
+            None => v8::null(scope).into(),
+        };
+        alleles_arr.set_index(scope, i as u32, val);
+    }
+
+    // Build phase array
+    let phase_arr = v8::Array::new(scope, gt.phase.len() as i32);
+    for (i, p) in gt.phase.iter().enumerate() {
+        let val: v8::Local<v8::Value> = v8::Boolean::new(scope, *p).into();
+        phase_arr.set_index(scope, i as u32, val);
+    }
+
+    let alleles_key = v8::String::new(scope, "alleles").unwrap();
+    let phase_key = v8::String::new(scope, "phase").unwrap();
+    obj.set(scope, alleles_key.into(), alleles_arr.into());
+    obj.set(scope, phase_key.into(), phase_arr.into());
+
+    obj.into()
+}
 
 /// Convert an InfoValue from the core to a V8 value.
 fn infovalue_to_v8<'s, 'i>(
@@ -95,6 +131,7 @@ fn formatvalue_to_v8<'s, 'i>(
             }
             arr.into()
         }
+        FormatValue::Genotype(gt) => genotype_to_v8(scope, gt),
     }
 }
 
@@ -338,6 +375,10 @@ pub fn create_object_template<'a>(
     let samples_key = v8::String::new(scope, "samples").unwrap();
     let samples_template = v8::FunctionTemplate::new(scope, samples_fn);
     object_template.set(samples_key.into(), samples_template.into());
+
+    let genotypes_key = v8::String::new(scope, "genotypes").unwrap();
+    let genotypes_template = v8::FunctionTemplate::new(scope, genotypes_fn);
+    object_template.set(genotypes_key.into(), genotypes_template.into());
 
     let to_string_key = v8::String::new(scope, "toString").unwrap();
     let to_string_template = v8::FunctionTemplate::new(scope, to_string_fn);
@@ -979,6 +1020,76 @@ fn samples_fn(
     rv.set(arr.into());
 }
 
+/// V8 callback for `variant.genotypes(subset?)`.
+///
+/// Uses the core `record_genotypes()` function to get parsed genotypes.
+/// Returns an array of Genotype objects: { alleles: number[]|null[], phase: boolean[] }
+fn genotypes_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    let Some(header_data) = this.get_internal_field(scope, HEADER_INTERNAL_FIELD_INDEX) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    let Ok(header_obj) = v8::Local::<v8::Object>::try_from(header_data) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+
+    let header_wrapper =
+        unsafe { v8::Object::unwrap::<{ header::HEADER_TAG }, header::Header>(scope, header_obj) }
+            .expect("Failed to unwrap Header");
+    let header: &header::Header = unsafe { header_wrapper.as_ref() };
+
+    // Parse optional subset argument
+    let subset_names: Option<Vec<String>> = if args.length() > 0 {
+        let arg0 = args.get(0);
+        if arg0.is_undefined() || arg0.is_null() {
+            None
+        } else if arg0.is_array() {
+            let Some(arr) = v8::Local::<v8::Array>::try_from(arg0).ok() else {
+                rv.set(v8::undefined(scope).into());
+                return;
+            };
+            let mut names = Vec::with_capacity(arr.length() as usize);
+            for i in 0..arr.length() {
+                if let Some(elem) = arr.get_index(scope, i) {
+                    if let Ok(s) = v8::Local::<v8::String>::try_from(elem) {
+                        names.push(s.to_rust_string_lossy(scope));
+                    }
+                }
+            }
+            Some(names)
+        } else {
+            // Invalid argument type - return undefined
+            rv.set(v8::undefined(scope).into());
+            return;
+        }
+    } else {
+        None
+    };
+
+    let record = variant.record(scope);
+    let subset_refs: Option<Vec<&str>> = subset_names.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+    let genotypes = htsvcf_core::record_genotypes(record, header.inner(), subset_refs.as_deref());
+
+    // Convert to V8 array of genotype objects
+    let arr = v8::Array::new(scope, genotypes.len() as i32);
+    for (i, gt) in genotypes.iter().enumerate() {
+        let obj = genotype_to_v8(scope, gt);
+        arr.set_index(scope, i as u32, obj);
+    }
+
+    rv.set(arr.into());
+}
+
 /// V8 callback for `variant.toString()`.
 ///
 /// Uses the core `record_to_string()` function to format the record as VCF.
@@ -1299,6 +1410,55 @@ chr1\t1\t.\tA\tC,G\t.\t.\tDP=7;AF=0.1,0.2;NOTE=hi;FLAGS=a,b,c;SOMATIC\n";
             eval_js(&path, "variant.toString().endsWith('\\n')"),
             "false"
         );
+    }
+
+    #[test]
+    /// `variant.genotypes()` should return parsed genotype objects.
+    fn test_variant_genotypes() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/genotypes.vcf")
+            .to_string_lossy()
+            .into_owned();
+
+        // Test genotypes() returns array
+        assert_eq!(eval_js(&path, "Array.isArray(variant.genotypes())"), "true");
+        assert_eq!(eval_js(&path, "variant.genotypes().length"), "5");
+
+        // diploid_unphased: 0/1
+        assert_eq!(eval_js(&path, "variant.genotypes()[0].alleles[0]"), "0");
+        assert_eq!(eval_js(&path, "variant.genotypes()[0].alleles[1]"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[0].phase[0]"), "false");
+
+        // diploid_phased: 1|1
+        assert_eq!(eval_js(&path, "variant.genotypes()[1].alleles[0]"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[1].alleles[1]"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[1].phase[0]"), "true");
+
+        // diploid_missing: ./1
+        assert_eq!(eval_js(&path, "variant.genotypes()[2].alleles[0]"), "null");
+        assert_eq!(eval_js(&path, "variant.genotypes()[2].alleles[1]"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[2].phase[0]"), "false");
+
+        // haploid: 1
+        assert_eq!(eval_js(&path, "variant.genotypes()[3].alleles.length"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[3].alleles[0]"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[3].phase.length"), "0");
+
+        // triploid: 0/1|2
+        assert_eq!(eval_js(&path, "variant.genotypes()[4].alleles.length"), "3");
+        assert_eq!(eval_js(&path, "variant.genotypes()[4].alleles[0]"), "0");
+        assert_eq!(eval_js(&path, "variant.genotypes()[4].alleles[1]"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes()[4].alleles[2]"), "2");
+        assert_eq!(eval_js(&path, "variant.genotypes()[4].phase[0]"), "false");
+        assert_eq!(eval_js(&path, "variant.genotypes()[4].phase[1]"), "true");
+
+        // Test genotypes(subset)
+        assert_eq!(eval_js(&path, "variant.genotypes(['haploid']).length"), "1");
+        assert_eq!(eval_js(&path, "variant.genotypes(['haploid'])[0].alleles[0]"), "1");
+
+        // Test sample().genotype
+        assert_eq!(eval_js(&path, "variant.sample('diploid_phased').genotype.alleles[0]"), "1");
+        assert_eq!(eval_js(&path, "variant.sample('diploid_phased').genotype.phase[0]"), "true");
     }
 }
 

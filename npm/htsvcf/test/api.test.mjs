@@ -378,3 +378,144 @@ test("Header.samples returns empty array for VCF without samples", async () => {
   reader.close();
   await fs.rm(tmp, { recursive: true, force: true });
 });
+
+test("Variant.genotypes returns parsed genotype objects", () => {
+  const genotypesVcf = path.join(__dirname, "..", "..", "..", "tests", "genotypes.vcf");
+  const reader = new Reader(genotypesVcf);
+
+  // First record: chr1 100 with genotypes 0/1, 1|1, ./1, 1, 0/1|2
+  const rec1 = reader.nextSync();
+  assert.equal(rec1.done, false);
+  const v1 = rec1.value;
+
+  const gts1 = v1.genotypes();
+  assert.ok(Array.isArray(gts1));
+  assert.equal(gts1.length, 5); // 5 samples
+
+  // diploid_unphased: 0/1
+  assert.deepEqual(gts1[0].alleles, [0, 1]);
+  assert.deepEqual(gts1[0].phase, [false]);
+
+  // diploid_phased: 1|1
+  assert.deepEqual(gts1[1].alleles, [1, 1]);
+  assert.deepEqual(gts1[1].phase, [true]);
+
+  // diploid_missing: ./1
+  assert.deepEqual(gts1[2].alleles, [null, 1]);
+  assert.deepEqual(gts1[2].phase, [false]);
+
+  // haploid: 1
+  assert.deepEqual(gts1[3].alleles, [1]);
+  assert.deepEqual(gts1[3].phase, []);
+
+  // triploid: 0/1|2
+  assert.deepEqual(gts1[4].alleles, [0, 1, 2]);
+  assert.deepEqual(gts1[4].phase, [false, true]);
+
+  // Second record: chr1 200 with genotypes 0/0, 0|1, .|., 0, 1|1|1
+  const rec2 = reader.nextSync();
+  assert.equal(rec2.done, false);
+  const v2 = rec2.value;
+
+  const gts2 = v2.genotypes();
+  assert.equal(gts2.length, 5);
+
+  // diploid_unphased: 0/0
+  assert.deepEqual(gts2[0].alleles, [0, 0]);
+  assert.deepEqual(gts2[0].phase, [false]);
+
+  // diploid_phased: 0|1
+  assert.deepEqual(gts2[1].alleles, [0, 1]);
+  assert.deepEqual(gts2[1].phase, [true]);
+
+  // diploid_missing: .|.
+  assert.deepEqual(gts2[2].alleles, [null, null]);
+  assert.deepEqual(gts2[2].phase, [true]);
+
+  // haploid: 0
+  assert.deepEqual(gts2[3].alleles, [0]);
+  assert.deepEqual(gts2[3].phase, []);
+
+  // triploid: 1|1|1
+  assert.deepEqual(gts2[4].alleles, [1, 1, 1]);
+  assert.deepEqual(gts2[4].phase, [true, true]);
+
+  reader.close();
+});
+
+test("Variant.genotypes with subset returns only specified samples", () => {
+  const genotypesVcf = path.join(__dirname, "..", "..", "..", "tests", "genotypes.vcf");
+  const reader = new Reader(genotypesVcf);
+
+  const rec = reader.nextSync();
+  const v = rec.value;
+
+  // Get only haploid and triploid samples
+  const subset = v.genotypes(["haploid", "triploid"]);
+  assert.equal(subset.length, 2);
+
+  // haploid: 1
+  assert.deepEqual(subset[0].alleles, [1]);
+  assert.deepEqual(subset[0].phase, []);
+
+  // triploid: 0/1|2
+  assert.deepEqual(subset[1].alleles, [0, 1, 2]);
+  assert.deepEqual(subset[1].phase, [false, true]);
+
+  // Reversed order
+  const reversed = v.genotypes(["triploid", "haploid"]);
+  assert.equal(reversed.length, 2);
+  assert.deepEqual(reversed[0].alleles, [0, 1, 2]); // triploid first
+  assert.deepEqual(reversed[1].alleles, [1]); // haploid second
+
+  // Unknown samples are skipped
+  const withUnknown = v.genotypes(["NOPE", "haploid", "ALSO_NOPE"]);
+  assert.equal(withUnknown.length, 1);
+  assert.deepEqual(withUnknown[0].alleles, [1]);
+
+  reader.close();
+});
+
+test("Variant.sample includes parsed genotype", () => {
+  const genotypesVcf = path.join(__dirname, "..", "..", "..", "tests", "genotypes.vcf");
+  const reader = new Reader(genotypesVcf);
+
+  const rec = reader.nextSync();
+  const v = rec.value;
+
+  const s = v.sample("diploid_phased");
+  assert.ok(s);
+  assert.equal(s.sample_name, "diploid_phased");
+  // Note: s.GT contains htslib's raw encoded value, not a human-readable string.
+  // Use s.genotype for parsed alleles/phase instead.
+  assert.ok(s.genotype);
+  assert.deepEqual(s.genotype.alleles, [1, 1]);
+  assert.deepEqual(s.genotype.phase, [true]);
+
+  reader.close();
+});
+
+test("Variant.samples includes parsed genotype for each sample", () => {
+  const genotypesVcf = path.join(__dirname, "..", "..", "..", "tests", "genotypes.vcf");
+  const reader = new Reader(genotypesVcf);
+
+  const rec = reader.nextSync();
+  const v = rec.value;
+
+  const samples = v.samples();
+  assert.equal(samples.length, 5);
+
+  // Check that each sample has a genotype property
+  for (const s of samples) {
+    assert.ok(s.genotype, `Sample ${s.sample_name} should have genotype`);
+    assert.ok(Array.isArray(s.genotype.alleles));
+    assert.ok(Array.isArray(s.genotype.phase));
+  }
+
+  // Verify specific samples
+  const haploid = samples.find(s => s.sample_name === "haploid");
+  assert.deepEqual(haploid.genotype.alleles, [1]);
+  assert.deepEqual(haploid.genotype.phase, []);
+
+  reader.close();
+});
