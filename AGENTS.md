@@ -41,3 +41,7 @@ do **all** of the following:
 5. **Run Rust tests**
    - `cargo test -p htsvcf`
    - `cargo test -p htsvcf-napi`
+
+6. **hygiene**
+   - `cargo clippy --all-targets --all-features -- -D warnings`
+   - `cargo fmt`
