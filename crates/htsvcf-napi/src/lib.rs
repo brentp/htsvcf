@@ -214,6 +214,41 @@ use napi::bindgen_prelude::*;
 use napi::{sys, Env};
 use napi_derive::napi;
 
+/// Represents a parsed genotype for a single sample.
+///
+/// The `alleles` array contains allele indices (0 = REF, 1+ = ALT),
+/// with `null` representing missing alleles (`.` in VCF notation).
+///
+/// The `phase` array indicates the phase separator between consecutive alleles:
+/// - `false` = unphased (`/`)
+/// - `true` = phased (`|`)
+#[napi(object)]
+pub struct Genotype {
+    /// Allele indices. `null` represents a missing allele (`.`).
+    pub alleles: Vec<Option<i32>>,
+    /// Phase separators. `phase[i]` indicates whether `alleles[i+1]` is phased
+    /// with `alleles[i]` (`true` = `|`, `false` = `/`).
+    pub phase: Vec<bool>,
+}
+
+impl From<core::Genotype> for Genotype {
+    fn from(g: core::Genotype) -> Self {
+        Genotype {
+            alleles: g.alleles,
+            phase: g.phase,
+        }
+    }
+}
+
+impl From<Genotype> for core::Genotype {
+    fn from(g: Genotype) -> Self {
+        core::Genotype {
+            alleles: g.alleles,
+            phase: g.phase,
+        }
+    }
+}
+
 #[napi(object)]
 pub struct ReaderOptions {}
 
@@ -735,11 +770,7 @@ impl Variant {
     }
 
     #[napi]
-    pub fn genotypes(
-        &self,
-        env: Env,
-        subset: Option<Vec<String>>,
-    ) -> napi::Result<sys::napi_value> {
+    pub fn genotypes(&self, subset: Option<Vec<String>>) -> napi::Result<Vec<Genotype>> {
         let subset_refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
@@ -747,18 +778,12 @@ impl Variant {
             .variant()?
             .genotypes(&self.header, subset_refs.as_deref());
 
-        let arr_items: Vec<sys::napi_value> = genotypes
-            .iter()
-            .map(|gt| genotype_to_napi_value(&env, gt))
-            .collect::<napi::Result<Vec<_>>>()?;
-
-        let arr = Array::from_vec(&env, arr_items)?;
-        Ok(arr.raw())
+        Ok(genotypes.into_iter().map(Genotype::from).collect())
     }
 
     #[napi(js_name = "set_genotypes")]
-    pub fn set_genotypes(&mut self, env: Env, genotypes: Array) -> napi::Result<()> {
-        let gts = parse_genotypes_array(&env, &genotypes)?;
+    pub fn set_genotypes(&mut self, genotypes: Vec<Genotype>) -> napi::Result<()> {
+        let gts: Vec<core::Genotype> = genotypes.into_iter().map(core::Genotype::from).collect();
         self.variant_mut()?.set_genotypes(&gts).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
@@ -1195,124 +1220,9 @@ fn formatvalue_to_napi_value(env: &Env, v: &FormatValue) -> napi::Result<sys::na
             let arr = Array::from_vec(env, inner_values)?;
             Ok(arr.raw())
         }
-        FormatValue::Genotype(gt) => genotype_to_napi_value(env, gt),
+        FormatValue::Genotype(gt) => {
+            let genotype = Genotype::from(gt.clone());
+            unsafe { ToNapiValue::to_napi_value(env.raw(), genotype) }
+        }
     }
-}
-
-fn genotype_to_napi_value(env: &Env, gt: &core::Genotype) -> napi::Result<sys::napi_value> {
-    let mut out: Object<'static> = Object::new(env)?;
-
-    // Build alleles array
-    let alleles: Vec<sys::napi_value> = gt
-        .alleles
-        .iter()
-        .map(|a| match a {
-            Some(n) => unsafe { ToNapiValue::to_napi_value(env.raw(), env.create_int32(*n)?) },
-            None => unsafe { ToNapiValue::to_napi_value(env.raw(), Null) },
-        })
-        .collect::<napi::Result<Vec<_>>>()?;
-    let alleles_arr = Array::from_vec(env, alleles)?;
-    out.set_named_property("alleles", alleles_arr)?;
-
-    // Build phase array
-    let phase: Vec<sys::napi_value> = gt
-        .phase
-        .iter()
-        .map(|p| unsafe { ToNapiValue::to_napi_value(env.raw(), *p) })
-        .collect::<napi::Result<Vec<_>>>()?;
-    let phase_arr = Array::from_vec(env, phase)?;
-    out.set_named_property("phase", phase_arr)?;
-
-    Ok(out.raw())
-}
-
-/// Parse a JS array of genotype objects into Vec<Genotype>.
-fn parse_genotypes_array(_env: &Env, arr: &Array) -> napi::Result<Vec<core::Genotype>> {
-    use napi::ValueType;
-
-    let len = arr.len();
-    let mut result = Vec::with_capacity(len as usize);
-
-    for i in 0..len {
-        let elem: Unknown = arr.get(i)?.ok_or_else(|| {
-            Error::new(
-                Status::InvalidArg,
-                format!("genotype at index {i} is missing"),
-            )
-        })?;
-
-        if elem.get_type()? != ValueType::Object {
-            return Err(Error::new(
-                Status::InvalidArg,
-                format!("genotype at index {i} must be an object"),
-            ));
-        }
-
-        let obj: Object = elem.coerce_to_object()?;
-
-        // Get alleles array
-        let alleles_val: Unknown = obj.get_named_property("alleles")?;
-        if !alleles_val.is_array()? {
-            return Err(Error::new(
-                Status::InvalidArg,
-                format!("genotype at index {i} must have 'alleles' array"),
-            ));
-        }
-        let alleles_arr: Array = Array::from_unknown(alleles_val)?;
-
-        let mut alleles = Vec::with_capacity(alleles_arr.len() as usize);
-        for j in 0..alleles_arr.len() {
-            let val: Unknown = alleles_arr
-                .get(j)?
-                .ok_or_else(|| Error::new(Status::InvalidArg, "allele value missing"))?;
-
-            match val.get_type()? {
-                ValueType::Null | ValueType::Undefined => alleles.push(None),
-                ValueType::Number => {
-                    let n: i32 = val.coerce_to_number()?.get_int32()?;
-                    alleles.push(Some(n));
-                }
-                _ => {
-                    return Err(Error::new(
-                        Status::InvalidArg,
-                        format!("allele at genotype[{i}].alleles[{j}] must be number or null"),
-                    ));
-                }
-            }
-        }
-
-        // Get phase array
-        let phase_val: Unknown = obj.get_named_property("phase")?;
-        if !phase_val.is_array()? {
-            return Err(Error::new(
-                Status::InvalidArg,
-                format!("genotype at index {i} must have 'phase' array"),
-            ));
-        }
-        let phase_arr: Array = Array::from_unknown(phase_val)?;
-
-        let mut phase = Vec::with_capacity(phase_arr.len() as usize);
-        for j in 0..phase_arr.len() {
-            let val: Unknown = phase_arr
-                .get(j)?
-                .ok_or_else(|| Error::new(Status::InvalidArg, "phase value missing"))?;
-
-            match val.get_type()? {
-                ValueType::Boolean => {
-                    let b: bool = unsafe { val.cast()? };
-                    phase.push(b);
-                }
-                _ => {
-                    return Err(Error::new(
-                        Status::InvalidArg,
-                        format!("phase at genotype[{i}].phase[{j}] must be boolean"),
-                    ));
-                }
-            }
-        }
-
-        result.push(core::Genotype { alleles, phase });
-    }
-
-    Ok(result)
 }
