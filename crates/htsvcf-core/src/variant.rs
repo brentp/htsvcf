@@ -46,6 +46,9 @@
 //! }
 //! ```
 
+use crate::genotype::{
+    parse_genotype, parse_genotype_for_sample, record_genotypes, record_set_genotypes, Genotype,
+};
 use crate::header::Header;
 use rust_htslib::bcf;
 use rust_htslib::bcf::header::{TagLength, TagType};
@@ -112,33 +115,6 @@ pub enum FormatValue {
     PerSample(Vec<FormatValue>),
     /// A parsed genotype value (for the GT field).
     Genotype(Genotype),
-}
-
-/// A parsed genotype for a single sample.
-///
-/// This struct represents the GT field parsed into structured data:
-/// - `alleles`: Allele indices where `None` represents missing (`.`)
-/// - `phase`: Phasing information for each allele after the first.
-///   `phase[i]` is `true` if there's a `|` separator before `alleles[i+1]`,
-///   `false` if there's a `/` separator.
-///
-/// # Examples
-///
-/// | GT String | alleles | phase |
-/// |-----------|---------|-------|
-/// | `0/1` | `[Some(0), Some(1)]` | `[false]` |
-/// | `1\|1` | `[Some(1), Some(1)]` | `[true]` |
-/// | `./1` | `[None, Some(1)]` | `[false]` |
-/// | `1` | `[Some(1)]` | `[]` |
-/// | `0/1\|2` | `[Some(0), Some(1), Some(2)]` | `[false, true]` |
-#[derive(Debug, Clone, PartialEq)]
-pub struct Genotype {
-    /// Allele indices. `None` represents a missing allele (`.`).
-    pub alleles: Vec<Option<i32>>,
-    /// Phase separators. `phase[i]` indicates whether `alleles[i+1]` is phased
-    /// with `alleles[i]` (`true` = `|`, `false` = `/`).
-    /// Length is always `alleles.len() - 1` (or 0 for haploid).
-    pub phase: Vec<bool>,
 }
 
 // ============================================================================
@@ -437,97 +413,6 @@ pub fn record_to_string(record: &bcf::Record, header: &Header) -> Option<String>
     }
 
     Some(text.trim_end_matches('\n').to_string())
-}
-
-/// Parse genotypes for all samples or a subset of samples.
-///
-/// Returns a vector of [`Genotype`] structs, one per requested sample.
-/// If `subset` is `None`, returns genotypes for all samples in header order.
-/// If `subset` is `Some(names)`, returns genotypes only for those samples
-/// in the order specified (unknown sample names are skipped).
-///
-/// Returns an empty vector if:
-/// - The record has no GT field
-/// - The record has no samples
-/// - None of the requested samples exist
-pub fn record_genotypes(
-    record: &bcf::Record,
-    header: &Header,
-    subset: Option<&[&str]>,
-) -> Vec<Genotype> {
-    let sample_count = record.sample_count() as usize;
-    if sample_count == 0 {
-        return Vec::new();
-    }
-
-    let gts = match record.genotypes() {
-        Ok(g) => g,
-        Err(_) => return Vec::new(),
-    };
-
-    // Determine which sample indices to include
-    let sample_indices: Vec<usize> = match subset {
-        None => (0..sample_count).collect(),
-        Some(names) => {
-            let name_to_idx = header.sample_name_to_idx();
-            names
-                .iter()
-                .filter_map(|name| name_to_idx.get(*name).copied())
-                .collect()
-        }
-    };
-
-    sample_indices
-        .iter()
-        .map(|&idx| parse_genotype(&gts.get(idx)))
-        .collect()
-}
-
-/// Parse a single genotype from rust-htslib's Genotype type.
-fn parse_genotype(gt: &rust_htslib::bcf::record::Genotype) -> Genotype {
-    use rust_htslib::bcf::record::GenotypeAllele;
-
-    let mut alleles: Vec<Option<i32>> = Vec::with_capacity(gt.len());
-    let mut phase: Vec<bool> = Vec::with_capacity(gt.len().saturating_sub(1));
-
-    for (i, allele) in gt.iter().enumerate() {
-        match allele {
-            GenotypeAllele::Unphased(idx) => {
-                alleles.push(Some(*idx));
-                // First allele has no preceding separator, subsequent unphased alleles mean '/'
-                if i > 0 {
-                    phase.push(false);
-                }
-            }
-            GenotypeAllele::Phased(idx) => {
-                alleles.push(Some(*idx));
-                // Phased means '|' separator before this allele
-                if i > 0 {
-                    phase.push(true);
-                }
-            }
-            GenotypeAllele::UnphasedMissing => {
-                alleles.push(None);
-                if i > 0 {
-                    phase.push(false);
-                }
-            }
-            GenotypeAllele::PhasedMissing => {
-                alleles.push(None);
-                if i > 0 {
-                    phase.push(true);
-                }
-            }
-        }
-    }
-
-    Genotype { alleles, phase }
-}
-
-/// Parse a single sample's genotype by index.
-fn parse_genotype_for_sample(record: &bcf::Record, sample_idx: usize) -> Option<Genotype> {
-    let gts = record.genotypes().ok()?;
-    Some(parse_genotype(&gts.get(sample_idx)))
 }
 
 /// Set an INFO flag value on a record.
@@ -1492,6 +1377,21 @@ impl Variant {
         record_genotypes(&self.record, header, subset)
     }
 
+    /// Set genotypes for all samples.
+    ///
+    /// Takes a slice of [`Genotype`] structs (same format returned by [`Variant::genotypes()`]).
+    /// The length should match the sample count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GT field cannot be set (e.g., not defined in header).
+    pub fn set_genotypes(
+        &mut self,
+        genotypes: &[Genotype],
+    ) -> Result<(), rust_htslib::errors::Error> {
+        record_set_genotypes(&mut self.record, genotypes)
+    }
+
     /// Get the list of FORMAT tag names present in this record.
     ///
     /// Returns a vector of (name_string, name_bytes) tuples for efficient
@@ -2137,6 +2037,149 @@ chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\n";
 
         // Should now be absent
         assert!(matches!(variant.format(&header, "DP"), FormatValue::Absent));
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_genotypes() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1|1\t./.\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-genotypes.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Original genotypes
+        let orig = variant.genotypes(&header, None);
+        assert_eq!(orig.len(), 3);
+        assert_eq!(orig[0].alleles, vec![Some(0), Some(1)]);
+        assert_eq!(orig[0].phase, vec![false]);
+        assert_eq!(orig[1].alleles, vec![Some(1), Some(1)]);
+        assert_eq!(orig[1].phase, vec![true]);
+        assert_eq!(orig[2].alleles, vec![None, None]);
+
+        // Set new genotypes: flip S1 to 1/0, S2 to 0/0, S3 to 1|1
+        let new_gts = vec![
+            Genotype {
+                alleles: vec![Some(1), Some(0)],
+                phase: vec![false],
+            },
+            Genotype {
+                alleles: vec![Some(0), Some(0)],
+                phase: vec![false],
+            },
+            Genotype {
+                alleles: vec![Some(1), Some(1)],
+                phase: vec![true],
+            },
+        ];
+        variant.set_genotypes(&new_gts).unwrap();
+
+        // Verify
+        let updated = variant.genotypes(&header, None);
+        assert_eq!(updated.len(), 3);
+        assert_eq!(updated[0].alleles, vec![Some(1), Some(0)]);
+        assert_eq!(updated[0].phase, vec![false]);
+        assert_eq!(updated[1].alleles, vec![Some(0), Some(0)]);
+        assert_eq!(updated[1].phase, vec![false]);
+        assert_eq!(updated[2].alleles, vec![Some(1), Some(1)]);
+        assert_eq!(updated[2].phase, vec![true]);
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_genotypes_with_missing() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1/1\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-genotypes-missing.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Set genotypes with missing alleles: ./1 and .|0
+        let new_gts = vec![
+            Genotype {
+                alleles: vec![None, Some(1)],
+                phase: vec![false],
+            },
+            Genotype {
+                alleles: vec![None, Some(0)],
+                phase: vec![true],
+            },
+        ];
+        variant.set_genotypes(&new_gts).unwrap();
+
+        let updated = variant.genotypes(&header, None);
+        assert_eq!(updated[0].alleles, vec![None, Some(1)]);
+        assert_eq!(updated[0].phase, vec![false]);
+        assert_eq!(updated[1].alleles, vec![None, Some(0)]);
+        assert_eq!(updated[1].phase, vec![true]);
+
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    #[test]
+    fn test_set_genotypes_haploid() {
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0\t1\n";
+
+        let tmp_dir = std::env::temp_dir().join("htsvcf-core-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let vcf_path = tmp_dir.join("set-genotypes-haploid.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+
+        let mut reader = bcf::Reader::from_path(&vcf_path).unwrap();
+        let header = unsafe { Header::new(reader.header().inner) };
+
+        let mut rec = reader.empty_record();
+        let _ = reader.read(&mut rec).unwrap();
+        let mut variant = Variant::from_record(rec);
+
+        // Set haploid genotypes
+        let new_gts = vec![
+            Genotype {
+                alleles: vec![Some(1)],
+                phase: vec![],
+            },
+            Genotype {
+                alleles: vec![Some(0)],
+                phase: vec![],
+            },
+        ];
+        variant.set_genotypes(&new_gts).unwrap();
+
+        let updated = variant.genotypes(&header, None);
+        assert_eq!(updated[0].alleles, vec![Some(1)]);
+        assert_eq!(updated[0].phase.len(), 0);
+        assert_eq!(updated[1].alleles, vec![Some(0)]);
+        assert_eq!(updated[1].phase.len(), 0);
 
         let _ = std::fs::remove_file(&vcf_path);
     }

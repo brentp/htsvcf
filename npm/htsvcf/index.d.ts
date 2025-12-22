@@ -140,6 +140,25 @@ export class Variant {
   samples(subset?: string[]): Array<{ sample_name: string; genotype?: Genotype } & Record<string, number | string | null | Array<number | string | null>>>;
   /** Get parsed genotypes for all samples, or a subset if specified. */
   genotypes(subset?: string[]): Genotype[];
+  /**
+   * Set genotypes for all samples.
+   *
+   * Accepts the same format returned by `genotypes()`.
+   * Array length must match the sample count.
+   *
+   * @example
+   * // Set genotypes for 2 samples
+   * variant.set_genotypes([
+   *   { alleles: [0, 1], phase: [false] },  // 0/1
+   *   { alleles: [1, 1], phase: [true] },   // 1|1
+   * ])
+   *
+   * // Set with missing alleles
+   * variant.set_genotypes([
+   *   { alleles: [null, 1], phase: [false] },  // ./1
+   * ])
+   */
+  set_genotypes(genotypes: Genotype[]): void;
   /** Convert to VCF line (without trailing newline). */
   toString(): string;
 }

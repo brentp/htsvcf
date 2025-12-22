@@ -378,6 +378,10 @@ pub fn create_object_template<'a>(
     let genotypes_template = v8::FunctionTemplate::new(scope, genotypes_fn);
     object_template.set(genotypes_key.into(), genotypes_template.into());
 
+    let set_genotypes_key = v8::String::new(scope, "set_genotypes").unwrap();
+    let set_genotypes_template = v8::FunctionTemplate::new(scope, set_genotypes_fn);
+    object_template.set(set_genotypes_key.into(), set_genotypes_template.into());
+
     let to_string_key = v8::String::new(scope, "toString").unwrap();
     let to_string_template = v8::FunctionTemplate::new(scope, to_string_fn);
     object_template.set(to_string_key.into(), to_string_template.into());
@@ -1369,6 +1373,154 @@ fn genotypes_fn(
     rv.set(arr.into());
 }
 
+/// V8 callback for `variant.set_genotypes(genotypes)`.
+///
+/// Sets genotypes for all samples. Accepts an array of genotype objects,
+/// each with `alleles` (array of numbers or null) and `phase` (array of booleans).
+fn set_genotypes_fn(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let wrapper = unsafe { v8::Object::unwrap::<TAG, Variant>(scope, this) }
+        .expect("Failed to unwrap Variant");
+    let variant = unsafe { wrapper.as_ref() };
+
+    if args.length() < 1 {
+        let msg = v8::String::new(
+            scope,
+            "variant.set_genotypes(genotypes) requires 1 argument",
+        )
+        .unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    }
+
+    let value = args.get(0);
+
+    // Value must be an array
+    let Ok(arr) = v8::Local::<v8::Array>::try_from(value) else {
+        let msg =
+            v8::String::new(scope, "variant.set_genotypes argument must be an array").unwrap();
+        scope.throw_exception(v8::Exception::type_error(scope, msg));
+        return;
+    };
+
+    // Parse each genotype object
+    let mut genotypes: Vec<htsvcf_core::Genotype> = Vec::with_capacity(arr.length() as usize);
+
+    for i in 0..arr.length() {
+        let Some(elem) = arr.get_index(scope, i) else {
+            let msg = v8::String::new(scope, &format!("genotype at index {i} is missing")).unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        };
+
+        let Ok(obj) = v8::Local::<v8::Object>::try_from(elem) else {
+            let msg = v8::String::new(scope, &format!("genotype at index {i} must be an object"))
+                .unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        };
+
+        // Get alleles property
+        let alleles_key = v8::String::new(scope, "alleles").unwrap();
+        let Some(alleles_val) = obj.get(scope, alleles_key.into()) else {
+            let msg = v8::String::new(
+                scope,
+                &format!("genotype at index {i} must have 'alleles' property"),
+            )
+            .unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        };
+
+        let Ok(alleles_arr) = v8::Local::<v8::Array>::try_from(alleles_val) else {
+            let msg = v8::String::new(
+                scope,
+                &format!("genotype at index {i} 'alleles' must be an array"),
+            )
+            .unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        };
+
+        let mut alleles: Vec<Option<i32>> = Vec::with_capacity(alleles_arr.length() as usize);
+        for j in 0..alleles_arr.length() {
+            let Some(val) = alleles_arr.get_index(scope, j) else {
+                alleles.push(None);
+                continue;
+            };
+
+            if val.is_null_or_undefined() {
+                alleles.push(None);
+            } else if let Ok(n) = v8::Local::<v8::Number>::try_from(val) {
+                alleles.push(Some(n.value() as i32));
+            } else {
+                let msg = v8::String::new(
+                    scope,
+                    &format!("allele at genotype[{i}].alleles[{j}] must be number or null"),
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        }
+
+        // Get phase property
+        let phase_key = v8::String::new(scope, "phase").unwrap();
+        let Some(phase_val) = obj.get(scope, phase_key.into()) else {
+            let msg = v8::String::new(
+                scope,
+                &format!("genotype at index {i} must have 'phase' property"),
+            )
+            .unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        };
+
+        let Ok(phase_arr) = v8::Local::<v8::Array>::try_from(phase_val) else {
+            let msg = v8::String::new(
+                scope,
+                &format!("genotype at index {i} 'phase' must be an array"),
+            )
+            .unwrap();
+            scope.throw_exception(v8::Exception::type_error(scope, msg));
+            return;
+        };
+
+        let mut phase: Vec<bool> = Vec::with_capacity(phase_arr.length() as usize);
+        for j in 0..phase_arr.length() {
+            let Some(val) = phase_arr.get_index(scope, j) else {
+                phase.push(false);
+                continue;
+            };
+
+            if let Ok(b) = v8::Local::<v8::Boolean>::try_from(val) {
+                phase.push(b.boolean_value(scope));
+            } else {
+                let msg = v8::String::new(
+                    scope,
+                    &format!("phase at genotype[{i}].phase[{j}] must be boolean"),
+                )
+                .unwrap();
+                scope.throw_exception(v8::Exception::type_error(scope, msg));
+                return;
+            }
+        }
+
+        genotypes.push(htsvcf_core::Genotype { alleles, phase });
+    }
+
+    // Call core function
+    let record = variant.record_mut(scope);
+    if let Err(e) = htsvcf_core::record_set_genotypes(record, &genotypes) {
+        let msg = v8::String::new(scope, &format!("failed to set genotypes: {e}")).unwrap();
+        scope.throw_exception(v8::Exception::error(scope, msg));
+    }
+}
+
 /// V8 callback for `variant.toString()`.
 ///
 /// Uses the core `record_to_string()` function to format the record as VCF.
@@ -1919,6 +2071,85 @@ chr1\t1\t.\tA\tC\t.\t.\t.\tDP\t10\t20\t30\n";
         assert!(
             result.contains("error:true"),
             "Expected length validation error, got: {}",
+            result
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    /// `variant.set_genotypes()` should set genotypes for all samples.
+    fn test_js_set_genotypes() {
+        let path = tmp_path("set_genotypes.vcf");
+        let vcf = "##fileformat=VCFv4.2\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##contig=<ID=chr1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n\
+chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1|1\t./.\n";
+        fs::write(&path, vcf).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Verify original genotypes
+        assert_eq!(eval_js(path, "variant.genotypes()[0].alleles[0]"), "0");
+        assert_eq!(eval_js(path, "variant.genotypes()[0].alleles[1]"), "1");
+        assert_eq!(eval_js(path, "variant.genotypes()[1].phase[0]"), "true");
+        assert_eq!(eval_js(path, "variant.genotypes()[2].alleles[0]"), "null");
+
+        // Set new genotypes and verify
+        let result = eval_js(
+            path,
+            r#"
+            variant.set_genotypes([
+                { alleles: [1, 0], phase: [false] },
+                { alleles: [0, 0], phase: [false] },
+                { alleles: [1, 1], phase: [true] }
+            ]);
+            JSON.stringify(variant.genotypes())
+            "#,
+        );
+
+        assert!(
+            result.contains(r#""alleles":[1,0]"#),
+            "Expected [1,0], got: {}",
+            result
+        );
+        assert!(
+            result.contains(r#""alleles":[0,0]"#),
+            "Expected [0,0], got: {}",
+            result
+        );
+        assert!(
+            result.contains(r#""alleles":[1,1]"#),
+            "Expected [1,1], got: {}",
+            result
+        );
+
+        // Test with missing alleles
+        let result = eval_js(
+            path,
+            r#"
+            variant.set_genotypes([
+                { alleles: [null, 1], phase: [false] },
+                { alleles: [0, null], phase: [true] },
+                { alleles: [null, null], phase: [false] }
+            ]);
+            JSON.stringify(variant.genotypes())
+            "#,
+        );
+
+        assert!(
+            result.contains(r#""alleles":[null,1]"#),
+            "Expected [null,1], got: {}",
+            result
+        );
+        assert!(
+            result.contains(r#""alleles":[0,null]"#),
+            "Expected [0,null], got: {}",
+            result
+        );
+        assert!(
+            result.contains(r#""alleles":[null,null]"#),
+            "Expected [null,null], got: {}",
             result
         );
 

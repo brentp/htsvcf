@@ -795,3 +795,211 @@ test("Variant.set_format rejects undefined FORMAT tag", async () => {
   reader.close();
   await fs.rm(tmp, { recursive: true, force: true });
 });
+
+test("Variant.set_genotypes modifies genotypes", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-genotypes-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1|1\t./.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  assert.equal(rec.done, false);
+  const variant = rec.value;
+
+  // Verify original genotypes
+  const orig = variant.genotypes();
+  assert.equal(orig.length, 3);
+  assert.deepEqual(orig[0].alleles, [0, 1]);
+  assert.deepEqual(orig[0].phase, [false]);
+  assert.deepEqual(orig[1].alleles, [1, 1]);
+  assert.deepEqual(orig[1].phase, [true]);
+  assert.deepEqual(orig[2].alleles, [null, null]);
+
+  // Set new genotypes: flip S1 to 1/0, S2 to 0/0, S3 to 1|1
+  variant.set_genotypes([
+    { alleles: [1, 0], phase: [false] },
+    { alleles: [0, 0], phase: [false] },
+    { alleles: [1, 1], phase: [true] },
+  ]);
+
+  // Verify updated genotypes
+  const updated = variant.genotypes();
+  assert.equal(updated.length, 3);
+  assert.deepEqual(updated[0].alleles, [1, 0]);
+  assert.deepEqual(updated[0].phase, [false]);
+  assert.deepEqual(updated[1].alleles, [0, 0]);
+  assert.deepEqual(updated[1].phase, [false]);
+  assert.deepEqual(updated[2].alleles, [1, 1]);
+  assert.deepEqual(updated[2].phase, [true]);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_genotypes handles missing alleles", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-genotypes-missing-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1/1",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  const variant = rec.value;
+
+  // Set genotypes with missing alleles: ./1 and .|0
+  variant.set_genotypes([
+    { alleles: [null, 1], phase: [false] },
+    { alleles: [null, 0], phase: [true] },
+  ]);
+
+  const updated = variant.genotypes();
+  assert.deepEqual(updated[0].alleles, [null, 1]);
+  assert.deepEqual(updated[0].phase, [false]);
+  assert.deepEqual(updated[1].alleles, [null, 0]);
+  assert.deepEqual(updated[1].phase, [true]);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_genotypes handles haploid genotypes", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-genotypes-haploid-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0\t1",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  const variant = rec.value;
+
+  // Set haploid genotypes
+  variant.set_genotypes([
+    { alleles: [1], phase: [] },
+    { alleles: [0], phase: [] },
+  ]);
+
+  const updated = variant.genotypes();
+  assert.deepEqual(updated[0].alleles, [1]);
+  assert.deepEqual(updated[0].phase, []);
+  assert.deepEqual(updated[1].alleles, [0]);
+  assert.deepEqual(updated[1].phase, []);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_genotypes handles polyploid genotypes", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-genotypes-polyploid-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2",
+    "chr1\t1\t.\tA\tC,G\t.\t.\t.\tGT\t0/1/2\t0|1|2",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  const variant = rec.value;
+
+  // Set triploid genotypes with mixed phasing
+  variant.set_genotypes([
+    { alleles: [2, 1, 0], phase: [true, false] },  // 2|1/0
+    { alleles: [0, 0, 1], phase: [false, true] },  // 0/0|1
+  ]);
+
+  const updated = variant.genotypes();
+  assert.deepEqual(updated[0].alleles, [2, 1, 0]);
+  assert.deepEqual(updated[0].phase, [true, false]);
+  assert.deepEqual(updated[1].alleles, [0, 0, 1]);
+  assert.deepEqual(updated[1].phase, [false, true]);
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("Variant.set_genotypes rejects wrong count", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "htsvcf-set-genotypes-count-"));
+  const tmpVcf = path.join(tmp, "t.vcf");
+
+  const vcf = [
+    "##fileformat=VCFv4.2",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+    "##contig=<ID=chr1>",
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3",
+    "chr1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\t1|1\t./.",
+  ].join("\n");
+
+  await fs.writeFile(tmpVcf, vcf);
+
+  const reader = new Reader(tmpVcf);
+  const rec = reader.nextSync();
+  const variant = rec.value;
+
+  // Too few genotypes (2 for 3 samples)
+  assert.throws(
+    () => variant.set_genotypes([
+      { alleles: [0, 1], phase: [false] },
+      { alleles: [1, 1], phase: [true] },
+    ]),
+    /length.*2.*sample.*3/i
+  );
+
+  // Too many genotypes (4 for 3 samples)
+  assert.throws(
+    () => variant.set_genotypes([
+      { alleles: [0, 1], phase: [false] },
+      { alleles: [1, 1], phase: [true] },
+      { alleles: [0, 0], phase: [false] },
+      { alleles: [1, 0], phase: [false] },
+    ]),
+    /length.*4.*sample.*3/i
+  );
+
+  reader.close();
+  await fs.rm(tmp, { recursive: true, force: true });
+});

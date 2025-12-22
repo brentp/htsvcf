@@ -111,6 +111,13 @@
 //!     // Clear an INFO field
 //!     variant.clear_info(&header, "DP").unwrap();
 //!
+//!     // Modify genotypes (one per sample)
+//!     use htsvcf_core::Genotype;
+//!     variant.set_genotypes(&[
+//!         Genotype { alleles: vec![Some(0), Some(1)], phase: vec![false] }, // 0/1
+//!         Genotype { alleles: vec![Some(1), Some(1)], phase: vec![true] },  // 1|1
+//!     ]).unwrap();
+//!
 //!     // Output as VCF line
 //!     if let Some(line) = variant.to_string(&header) {
 //!         println!("{}", line);
@@ -136,19 +143,21 @@
 //! - `Array(Vec<FormatValue>)` - Multi-value field for one sample
 //! - `PerSample(Vec<FormatValue>)` - Array of values, one per sample
 
+pub mod genotype;
 pub mod header;
 pub mod reader;
 pub mod region;
 pub mod variant;
 pub mod writer;
 
+pub use genotype::{record_genotypes, record_set_genotypes, Genotype};
 pub use header::Header;
 pub use reader::{open_reader, InnerReader, Reader};
 pub use variant::{
     format_float_missing, format_int_missing, get_format_tag_names, record_clear_format,
-    record_clear_info, record_format, record_genotypes, record_info, record_sample, record_samples,
+    record_clear_info, record_format, record_info, record_sample, record_samples,
     record_set_format_float, record_set_format_integer, record_set_format_string,
     record_set_info_flag, record_set_info_float, record_set_info_integer, record_set_info_string,
-    record_to_string, FormatValue, Genotype, InfoValue, Variant,
+    record_to_string, FormatValue, InfoValue, Variant,
 };
 pub use writer::{open_writer, OutputFormat, Writer, WriterOptions};

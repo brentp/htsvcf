@@ -278,6 +278,13 @@ const gts = variant.genotypes();
 
 // Genotypes for a subset of samples
 const gtSubset = variant.genotypes(["S1", "S2"]);
+
+// Modify genotypes (one per sample, must match sample count)
+variant.set_genotypes([
+  { alleles: [0, 1], phase: [false] },  // 0/1
+  { alleles: [1, 1], phase: [true] },   // 1|1
+  { alleles: [null, 1], phase: [false] }, // ./1
+]);
 ```
 
 #### String Representation
