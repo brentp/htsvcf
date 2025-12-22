@@ -36,8 +36,8 @@ export type Genotype = {
 export class Header {
   /** Get all header records (INFO, FORMAT, FILTER, contig, etc.). */
   records(): HeaderRecord[];
-  /** Get a specific INFO or FORMAT field definition by ID. */
-  get(section: "INFO" | "FORMAT", id: string): HeaderGetResult | undefined;
+  /** Get a specific INFO or FORMAT field definition by ID. Returns null if not found. */
+  get(section: "INFO" | "FORMAT", id: string): HeaderGetResult | null;
   /** Add a new INFO field definition to the header. */
   addInfo(id: string, number: string, type: "Flag" | "Integer" | "Float" | "String", description: string): void;
   /** Add a new FORMAT field definition to the header. */

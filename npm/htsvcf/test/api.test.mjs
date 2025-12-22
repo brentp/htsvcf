@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const vcfPath = path.join(__dirname, "..", "..", "..", "tests", "t.vcf.gz");
 
-test("Header.get includes Description and undefined for missing", () => {
+test("Header.get includes Description and null for missing", () => {
   const reader = new Reader(vcfPath);
 
   const dp = reader.header.get("INFO", "DP");
@@ -20,7 +20,7 @@ test("Header.get includes Description and undefined for missing", () => {
   assert.equal(dp.description, "Depth");
 
   const nope = reader.header.get("INFO", "NOPE");
-  assert.equal(nope, undefined);
+  assert.equal(nope, null);
 
   reader.close();
 });

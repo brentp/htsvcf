@@ -68,7 +68,7 @@ assert.equal(dp.type, "Integer");
 assert.equal(dp.number, "1");
 assert.equal(dp.description, "Depth");
 
-assert.equal(reader.header.get("INFO", "NOPE"), undefined);
+assert.equal(reader.header.get("INFO", "NOPE"), null);
 
 console.log("header stable identity:", reader.header === reader.header);
 console.log("header.get(INFO,DP):", dp);

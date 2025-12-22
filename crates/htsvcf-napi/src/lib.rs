@@ -1121,34 +1121,23 @@ impl Header {
     }
 
     #[napi]
-    pub fn get(&self, env: Env, section: String, id: String) -> napi::Result<sys::napi_value> {
-        let Some(field) = self.inner.get_field(&section, &id) else {
-            return unsafe { ToNapiValue::to_napi_value(env.raw(), ()) };
-        };
-
-        let mut out = Object::new(&env)?;
-        out.set_named_property("id", field.id)?;
-        out.set_named_property("type", field.r#type)?;
-        out.set_named_property("number", field.number)?;
-        out.set_named_property("description", field.description)?;
-
-        Ok(out.raw())
+    pub fn get(&self, section: String, id: String) -> Option<HeaderField> {
+        self.inner.get_field(&section, &id).map(HeaderField::from)
     }
 
     #[napi]
-    pub fn records(&self, env: Env) -> napi::Result<Vec<Object<'static>>> {
-        let mut out = Vec::new();
-        for (section, field) in self.inner.all_fields() {
-            let mut o: Object<'static> = Object::new(&env)?;
-            o.set_named_property("section", section)?;
-            o.set_named_property("id", field.id)?;
-            o.set_named_property("number", field.number)?;
-            o.set_named_property("type", field.r#type)?;
-            o.set_named_property("description", field.description)?;
-            out.push(o);
-        }
-
-        Ok(out)
+    pub fn records(&self) -> Vec<HeaderRecord> {
+        self.inner
+            .all_fields()
+            .into_iter()
+            .map(|(section, field)| HeaderRecord {
+                section,
+                id: field.id,
+                r#type: field.r#type,
+                number: field.number,
+                description: field.description,
+            })
+            .collect()
     }
 
     #[napi]
@@ -1157,8 +1146,31 @@ impl Header {
     }
 }
 
+/// A VCF header field definition (INFO or FORMAT).
 #[napi(object)]
-pub struct HeaderGetResult {
+pub struct HeaderField {
+    pub id: String,
+    #[napi(js_name = "type")]
+    pub r#type: String,
+    pub number: String,
+    pub description: String,
+}
+
+impl From<core::header::HeaderField> for HeaderField {
+    fn from(f: core::header::HeaderField) -> Self {
+        HeaderField {
+            id: f.id,
+            r#type: f.r#type,
+            number: f.number,
+            description: f.description,
+        }
+    }
+}
+
+/// A VCF header record with its section (INFO, FORMAT, FILTER, etc.).
+#[napi(object)]
+pub struct HeaderRecord {
+    pub section: String,
     pub id: String,
     #[napi(js_name = "type")]
     pub r#type: String,
