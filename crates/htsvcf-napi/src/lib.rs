@@ -208,6 +208,8 @@ use std::sync::{Arc, Mutex};
 
 mod format;
 
+const DEFAULT_BATCH_SIZE: usize = 32;
+
 use htsvcf_core as core;
 use htsvcf_core::variant::FormatValue;
 use napi::bindgen_prelude::*;
@@ -336,6 +338,27 @@ impl Reader {
         })
     }
 
+    /// Read the next batch of variants asynchronously.
+    /// Returns an array of Variant objects. Empty array means EOF.
+    /// More efficient than next() for bulk iteration as it avoids
+    /// creating {done, value} wrapper objects for each variant.
+    #[napi(js_name = "nextBatchAsync")]
+    pub fn next_batch_async(&self, size: Option<u32>) -> napi::Result<AsyncTask<NextBatchTask>> {
+        let batch_size = size.map(|s| s as usize).unwrap_or(DEFAULT_BATCH_SIZE);
+        if batch_size == 0 || batch_size > 16384 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!("batch size must be between 1 and 16384, got {}", batch_size),
+            ));
+        }
+
+        Ok(AsyncTask::new(NextBatchTask {
+            inner: self.inner.clone(),
+            header: self.header.clone(),
+            size: batch_size,
+        }))
+    }
+
     #[napi(js_name = "nextSync")]
     pub fn next_sync(&self, env: Env) -> napi::Result<Object<'static>> {
         let mut guard = self
@@ -370,6 +393,50 @@ impl Reader {
         }
 
         Ok(out)
+    }
+
+    /// Read the next batch of variants synchronously.
+    /// Returns an array of Variant objects. Empty array means EOF.
+    /// This is more efficient than calling nextSync() repeatedly when
+    /// processing many variants, as it avoids creating {done, value}
+    /// wrapper objects for each variant.
+    #[napi(js_name = "nextBatchSync")]
+    pub fn next_batch_sync(&self, size: Option<u32>) -> napi::Result<Vec<Variant>> {
+        let batch_size = size.map(|s| s as usize).unwrap_or(DEFAULT_BATCH_SIZE);
+        if batch_size == 0 || batch_size > 16384 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!("batch size must be between 1 and 16384, got {}", batch_size),
+            ));
+        }
+
+        let mut reader_guard = self
+            .inner
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "reader lock poisoned"))?;
+        let reader = reader_guard
+            .as_mut()
+            .ok_or_else(|| Error::new(Status::GenericFailure, "reader is closed"))?;
+
+        let mut variants = Vec::with_capacity(batch_size);
+
+        for _ in 0..batch_size {
+            let rec = reader
+                .next_record()
+                .map_err(|e| Error::new(Status::GenericFailure, format!("read failed: {e}")))?;
+
+            match rec {
+                None => break, // EOF
+                Some(record) => {
+                    variants.push(Variant {
+                        inner: Some(core::Variant::from_record(record)),
+                        header: self.header.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(variants)
     }
 
     #[napi]
@@ -614,6 +681,54 @@ impl Task for NextTask {
         }
 
         Ok(out)
+    }
+}
+
+pub struct NextBatchTask {
+    inner: Arc<Mutex<Option<core::Reader>>>,
+    header: Arc<core::Header>,
+    size: usize,
+}
+
+impl Task for NextBatchTask {
+    type Output = Vec<core::Variant>;
+    type JsValue = Vec<Variant>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "reader lock poisoned"))?;
+        let reader = guard
+            .as_mut()
+            .ok_or_else(|| Error::new(Status::GenericFailure, "reader is closed"))?;
+
+        let mut variants = Vec::with_capacity(self.size);
+
+        for _ in 0..self.size {
+            let rec = reader
+                .next_record()
+                .map_err(|e| Error::new(Status::GenericFailure, format!("read failed: {e}")))?;
+
+            match rec {
+                None => break, // EOF
+                Some(record) => {
+                    variants.push(core::Variant::from_record(record));
+                }
+            }
+        }
+
+        Ok(variants)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(|v| Variant {
+                inner: Some(v),
+                header: self.header.clone(),
+            })
+            .collect())
     }
 }
 

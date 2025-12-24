@@ -38,7 +38,10 @@ console.log(`Created: ${vcfPath}`);
 console.log(`Variants: ${variantCount}`);
 console.log(`Iterations: ${iterations}\n`);
 
-// Benchmark synchronous iteration with nextSync()
+// Expected sum of positions: 1 + 2 + ... + variantCount = n*(n+1)/2
+const expectedPosSum = (variantCount * (variantCount + 1)) / 2;
+
+// Benchmark synchronous iteration with for...of (uses nextBatchSync internally)
 async function benchSync() {
   const times = [];
 
@@ -49,9 +52,7 @@ async function benchSync() {
 
     const start = performance.now();
 
-    let result;
-    while (!(result = reader.nextSync()).done) {
-      const variant = result.value;
+    for (const variant of reader) {
       posSum += variant.pos;
       count++;
     }
@@ -63,6 +64,9 @@ async function benchSync() {
 
     if (count !== variantCount) {
       throw new Error(`Sync count mismatch: ${count} vs ${variantCount}`);
+    }
+    if (posSum !== expectedPosSum) {
+      throw new Error(`Sync posSum mismatch: ${posSum} vs ${expectedPosSum}`);
     }
   }
 
@@ -92,6 +96,9 @@ async function benchAsync() {
 
     if (count !== variantCount) {
       throw new Error(`Async count mismatch: ${count} vs ${variantCount}`);
+    }
+    if (posSum !== expectedPosSum) {
+      throw new Error(`Async posSum mismatch: ${posSum} vs ${expectedPosSum}`);
     }
   }
 
@@ -138,7 +145,7 @@ console.log("=".repeat(50));
 console.log("RESULTS");
 console.log("=".repeat(50));
 console.log();
-console.log(formatStats("Synchronous (nextSync)", syncStats, variantCount));
+console.log(formatStats("Synchronous (for...of)", syncStats, variantCount));
 console.log();
 console.log(formatStats("Asynchronous (for await)", asyncStats, variantCount));
 console.log();

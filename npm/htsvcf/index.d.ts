@@ -217,6 +217,26 @@ export class Reader {
   /** Read next variant synchronously. */
   nextSync(): IteratorResult<Variant>;
 
+  /**
+   * Read the next batch of variants synchronously.
+   * Returns an array of Variant objects. Empty array means EOF.
+   * More efficient than nextSync() for bulk iteration as it avoids
+   * creating {done, value} wrapper objects for each variant.
+   * Used internally by the sync iterator (for...of).
+   * @param size Batch size (default: 32)
+   */
+  nextBatchSync(size?: number): Variant[];
+
+  /**
+   * Read the next batch of variants asynchronously.
+   * Returns an array of Variant objects. Empty array means EOF.
+   * More efficient than next() for bulk iteration as it avoids
+   * creating {done, value} wrapper objects for each variant.
+   * Used internally by the async iterator (for await...of).
+   * @param size Batch size (default: 32)
+   */
+  nextBatchAsync(size?: number): Promise<Variant[]>;
+
   /** Close the reader and release resources. */
   close(): void;
 }

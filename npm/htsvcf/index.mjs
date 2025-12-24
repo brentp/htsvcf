@@ -34,20 +34,51 @@ try {
 
 export const { Reader, Header, Variant, Writer, openReader } = native;
 
+// Provide a fast asynchronous iterator backed by nextBatchAsync().
 if (Reader && !Reader.prototype[Symbol.asyncIterator]) {
   Reader.prototype[Symbol.asyncIterator] = function () {
-    return this;
+    const reader = this;
+    let batch = [];
+    let index = 0;
+
+    return {
+      async next() {
+        // Refill batch when exhausted
+        if (index >= batch.length) {
+          batch = await reader.nextBatchAsync();
+          index = 0;
+          if (batch.length === 0) {
+            return { done: true, value: undefined };
+          }
+        }
+        return { done: false, value: batch[index++] };
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
   };
 }
 
-// Provide a fast synchronous iterator backed by nextSync().
+// Provide a fast synchronous iterator backed by nextBatchSync().
 // This keeps async iteration available via Symbol.asyncIterator.
 if (Reader && !Reader.prototype[Symbol.iterator]) {
   Reader.prototype[Symbol.iterator] = function () {
     const reader = this;
+    let batch = [];
+    let index = 0;
+
     return {
       next() {
-        return reader.nextSync();
+        // Refill batch when exhausted
+        if (index >= batch.length) {
+          batch = reader.nextBatchSync();
+          index = 0;
+          if (batch.length === 0) {
+            return { done: true, value: undefined };
+          }
+        }
+        return { done: false, value: batch[index++] };
       },
       [Symbol.iterator]() {
         return this;
