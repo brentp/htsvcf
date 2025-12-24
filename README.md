@@ -3,7 +3,7 @@
 Reading and working with VCF/BCF using HTSlib (via `rust-htslib`), with two JavaScript-related facets:
 
 1. A Rust library + CLI that evaluates JavaScript expressions per VCF record
-2. A **Node-API addon** for programmatic use from Node.js/Bun
+2. A **Node-API addon** for programmatic use from Node.js/Bun [npmjs](https://www.npmjs.com/package/htsvcf)
 
 ## crates/htsvcf (CLI + V8 Library)
 
